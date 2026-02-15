@@ -1,0 +1,2 @@
+# Smart-Study-Planner
+The Smart Study Planner is a study scheduling application developed for Programming Data Structures and Algorithms coursework. The system uses a Circular Linked List to automatically rotate study subjects based on priority, time allocation, and syllabus completion. It helps students manage study time efficiently, track progress, and maintain a balanced study routine. The project is developed and managed using GitHub for version control and collaboration.
