@@ -4,6 +4,7 @@ import Subjects from "./components/Subjects";
 import Schedule from "./components/Schedule";
 import Report from "./components/Report";
 import { loadState, saveState } from "./lib/storage";
+import { plannerApi } from "./api/plannerApi";
 
 const TABS = [
   { key: "Subjects", label: "Subjects" },
@@ -12,16 +13,33 @@ const TABS = [
   { key: "Report", label: "Report" },
 ];
 
+const DEFAULT_SETTINGS = {
+  startTime: "08:00",
+  dailyMaxHours: 4,
+  breakEveryMinutes: 60,
+  breakDurationMinutes: 10,
+};
+
+function normalizeSettings(s) {
+  const safe = {
+    startTime: s?.startTime || DEFAULT_SETTINGS.startTime,
+    dailyMaxHours: Number(s?.dailyMaxHours ?? DEFAULT_SETTINGS.dailyMaxHours),
+    breakEveryMinutes: Number(s?.breakEveryMinutes ?? DEFAULT_SETTINGS.breakEveryMinutes),
+    breakDurationMinutes: Number(s?.breakDurationMinutes ?? DEFAULT_SETTINGS.breakDurationMinutes),
+  };
+
+  if (!safe.startTime) safe.startTime = "08:00";
+  if (safe.dailyMaxHours <= 0) safe.dailyMaxHours = 2;
+  if (safe.breakEveryMinutes < 15) safe.breakEveryMinutes = 50;
+  if (safe.breakDurationMinutes < 5) safe.breakDurationMinutes = 10;
+
+  return safe;
+}
+
 export default function App() {
   const [tab, setTab] = useState("Subjects");
 
-  const [settings, setSettings] = useState({
-    startTime: "08:00",
-    dailyMaxHours: 4,
-    breakEveryMinutes: 60,
-    breakDurationMinutes: 10,
-  });
-
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [subjects, setSubjects] = useState([]);
   const [schedule, setSchedule] = useState([]);
   const [missed, setMissed] = useState([]);
@@ -29,21 +47,23 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [apiError, setApiError] = useState("");
 
+  // Load localStorage once (safe merge)
   useEffect(() => {
     const saved = loadState();
-    if (saved?.settings) setSettings(saved.settings);
+    if (saved?.settings) setSettings({ ...DEFAULT_SETTINGS, ...saved.settings });
     if (saved?.subjects) setSubjects(saved.subjects);
     if (saved?.schedule) setSchedule(saved.schedule);
     if (saved?.missed) setMissed(saved.missed);
   }, []);
 
+  // Save to localStorage
   useEffect(() => {
     saveState({ settings, subjects, schedule, missed });
   }, [settings, subjects, schedule, missed]);
 
   const canGenerate = useMemo(() => {
     if (!subjects.length) return false;
-    return subjects.some((s) => (s.totalTopics - s.completedTopics) > 0);
+    return subjects.some((s) => Number(s.totalTopics || 0) - Number(s.completedTopics || 0) > 0);
   }, [subjects]);
 
   const stats = useMemo(() => {
@@ -52,15 +72,18 @@ export default function App() {
     const remainingTopics = Math.max(0, totalTopics - completedTopics);
     const pct = totalTopics > 0 ? Math.round((completedTopics / totalTopics) * 100) : 0;
 
-    const studyMin = (schedule || []).filter((x) => x.type === "study")
+    const studyMin = (schedule || [])
+      .filter((x) => x.type === "study")
       .reduce((sum, x) => sum + Number(x.durationMinutes || 0), 0);
 
-    const breakMin = (schedule || []).filter((x) => x.type === "break")
+    const breakMin = (schedule || [])
+      .filter((x) => x.type === "break")
       .reduce((sum, x) => sum + Number(x.durationMinutes || 0), 0);
 
     return { totalTopics, completedTopics, remainingTopics, pct, studyMin, breakMin };
   }, [subjects, schedule]);
 
+  // ✅ Correct backend generation call (POST /api/schedule/generate)
   async function generateSchedule() {
     setApiError("");
 
@@ -69,47 +92,29 @@ export default function App() {
       return;
     }
 
+    // Validate subjects (same as yours)
     for (const s of subjects) {
       if (!s.name?.trim()) return setApiError("Subject name cannot be empty.");
-      if (s.durationMinutes <= 0) return setApiError("Duration must be > 0.");
-      if (s.priority < 1 || s.priority > 5) return setApiError("Priority must be 1–5.");
-      if (s.totalTopics < 1) return setApiError("Total topics must be >= 1.");
-      if (s.completedTopics < 0 || s.completedTopics > s.totalTopics)
+      if (Number(s.durationMinutes) <= 0) return setApiError("Duration must be > 0.");
+      if (Number(s.priority) < 1 || Number(s.priority) > 5) return setApiError("Priority must be 1–5.");
+      if (Number(s.totalTopics) < 1) return setApiError("Total topics must be >= 1.");
+      if (Number(s.completedTopics) < 0 || Number(s.completedTopics) > Number(s.totalTopics))
         return setApiError("Completed topics must be between 0 and total topics.");
     }
 
     setLoading(true);
-
     try {
-      const payload = {
-        settings: {
-          ...settings,
-          dailyMaxMinutes: Number(settings.dailyMaxHours) * 60,
-        },
-        subjects: subjects.map((s) => ({
-          id: s.id,
-          name: s.name,
-          durationMinutes: Number(s.durationMinutes),
-          priority: Number(s.priority),
-          totalTopics: Number(s.totalTopics),
-          completedTopics: Number(s.completedTopics),
-          targetDate: s.targetDate || null,
-        })),
-      };
+      // ✅ Send only ScheduleRequest (backend expects this)
+      const payload = normalizeSettings(settings);
 
-      const res = await fetch("/plan/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const data = await plannerApi.generateSchedule(payload);
 
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `Request failed (${res.status})`);
+      if (!Array.isArray(data) || data.length === 0) {
+        setApiError("No schedule generated. Check planner settings and ensure subjects exist in backend.");
+        return;
       }
 
-      const data = await res.json();
-      setSchedule(Array.isArray(data?.sessions) ? data.sessions : []);
+      setSchedule(data);
       setMissed([]);
       setTab("Schedule");
     } catch (e) {
@@ -211,6 +216,7 @@ export default function App() {
             {tab === "Schedule" && (
               <Panel title="Daily Schedule" subtitle="Generated sessions from backend. Mark missed, update progress.">
                 <Schedule
+                  settings={settings}              // ✅ IMPORTANT
                   schedule={schedule}
                   setSchedule={setSchedule}
                   missed={missed}

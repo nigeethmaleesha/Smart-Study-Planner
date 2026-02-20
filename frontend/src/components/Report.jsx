@@ -2,10 +2,12 @@ import { useMemo } from "react";
 
 export default function Report({ schedule, subjects, missed }) {
   const stats = useMemo(() => {
-    const studyMin = (schedule || []).filter((s) => s.type === "study")
+    const studyMin = (schedule || [])
+      .filter((s) => s.type === "study")
       .reduce((sum, s) => sum + Number(s.durationMinutes || 0), 0);
 
-    const breakMin = (schedule || []).filter((s) => s.type === "break")
+    const breakMin = (schedule || [])
+      .filter((s) => s.type === "break")
       .reduce((sum, s) => sum + Number(s.durationMinutes || 0), 0);
 
     const totalTopics = subjects.reduce((a, s) => a + Number(s.totalTopics || 0), 0);

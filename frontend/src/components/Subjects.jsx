@@ -1,7 +1,21 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
+import { plannerApi } from "../api/plannerApi";
 
 export default function Subjects({ subjects, setSubjects }) {
   const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // Load subjects from backend once
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await plannerApi.getSubjects();
+        setSubjects(Array.isArray(data) ? data : []);
+      } catch {
+        setSubjects([]);
+      }
+    })();
+  }, [setSubjects]);
 
   const totals = useMemo(() => {
     const totalTopics = subjects.reduce((a, s) => a + Number(s.totalTopics || 0), 0);
@@ -10,31 +24,56 @@ export default function Subjects({ subjects, setSubjects }) {
     return { totalTopics, completedTopics, pct };
   }, [subjects]);
 
-  function addSubject() {
+  async function refresh() {
+    const data = await plannerApi.getSubjects();
+    setSubjects(Array.isArray(data) ? data : []);
+  }
+
+  async function addSubject() {
     if (!name.trim()) return;
 
-    setSubjects((prev) => [
-      {
-        id: crypto.randomUUID(),
+    setBusy(true);
+    try {
+      await plannerApi.addSubject({
         name: name.trim(),
         durationMinutes: 30,
         priority: 3,
         totalTopics: 10,
         completedTopics: 0,
         targetDate: "",
-      },
-      ...prev,
-    ]);
-
-    setName("");
+      });
+      setName("");
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
   }
 
-  function updateSubject(id, patch) {
-    setSubjects((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  async function updateSubject(id, patch) {
+    // keep UI instant (optimistic) without changing style
+    const current = subjects.find((s) => s.id === id);
+    if (!current) return;
+
+    const updated = { ...current, ...patch };
+    setSubjects((prev) => prev.map((s) => (s.id === id ? updated : s)));
+
+    try {
+      await plannerApi.updateSubject(id, updated);
+    } catch {
+      // rollback by reloading
+      await refresh();
+    }
   }
 
-  function removeSubject(id) {
+  async function removeSubject(id) {
+    // optimistic
     setSubjects((prev) => prev.filter((s) => s.id !== id));
+
+    try {
+      await plannerApi.deleteSubject(id);
+    } catch {
+      await refresh();
+    }
   }
 
   return (
@@ -54,9 +93,10 @@ export default function Subjects({ subjects, setSubjects }) {
 
         <button
           onClick={addSubject}
-          className="mt-4 w-full rounded-2xl bg-blue-600 py-3 text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
+          disabled={busy}
+          className="mt-4 w-full rounded-2xl bg-blue-600 py-3 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60"
         >
-          Add Subject
+          {busy ? "Adding..." : "Add Subject"}
         </button>
 
         <div className="mt-5 rounded-3xl border bg-slate-50 p-4">
@@ -198,8 +238,6 @@ function PriorityBadge({ value }) {
       ? "bg-orange-50 text-orange-700 border-orange-200"
       : value === 3
       ? "bg-blue-50 text-blue-700 border-blue-200"
-      : value === 2
-      ? "bg-slate-50 text-slate-700 border-slate-200"
       : "bg-slate-50 text-slate-700 border-slate-200";
 
   return (
@@ -223,9 +261,7 @@ function EmptyState() {
     <div className="rounded-3xl border bg-white p-10 text-center shadow-sm">
       <div className="mx-auto h-12 w-12 rounded-2xl bg-slate-100" />
       <div className="mt-4 text-base font-semibold text-slate-900">No subjects yet</div>
-      <div className="mt-2 text-sm text-slate-500">
-        Add a subject to start building the circular rotation list.
-      </div>
+      <div className="mt-2 text-sm text-slate-500">Add a subject to start building the circular rotation list.</div>
     </div>
   );
 }
