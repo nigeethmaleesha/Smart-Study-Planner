@@ -62,75 +62,113 @@ public class PlannerService {
         return store.heap.asArray();
     }
 
-    // ---- SCHEDULE GENERATION (Heap priority + breaks) ----
+    // ✅ Score based on priority + remaining + completion ratio
+    private double score(Subject s) {
+        int remaining = s.remainingTopics();
+        int total = Math.max(1, s.getTotalTopics());
+        double completionRatio = (double) s.getCompletedTopics() / total; // 0..1
+
+        // weights you can tune
+        double wPriority = 100.0;
+        double wRemaining = 10.0;
+        double wNotDone = 80.0; // encourages subjects not yet completed
+
+        return (s.getPriority() * wPriority)
+                + (remaining * wRemaining)
+                + ((1.0 - completionRatio) * wNotDone);
+    }
+
+    // ---- SCHEDULE GENERATION (CLL fairness + Heap selection) ----
     public List<ScheduleItem> generateSchedule(ScheduleRequest req) {
 
-        // ✅ SAFETY DEFAULTS (prevents empty schedule / infinite loops)
         String startTime = (req.getStartTime() == null || req.getStartTime().isBlank()) ? "08:00" : req.getStartTime();
 
         double dailyMaxHours = req.getDailyMaxHours();
-        if (dailyMaxHours <= 0) dailyMaxHours = 2; // default 2 hours
+        if (dailyMaxHours <= 0) dailyMaxHours = 2;
 
         int breakEvery = req.getBreakEveryMinutes();
-        if (breakEvery < 15) breakEvery = 50; // default 50 mins
+        if (breakEvery < 15) breakEvery = 50;
 
         int breakDuration = req.getBreakDurationMinutes();
-        if (breakDuration < 5) breakDuration = 10; // default 10 mins
+        if (breakDuration < 5) breakDuration = 10;
 
-        // ✅ if no subjects in backend, return empty
         if (store.cll.isEmpty()) return new ArrayList<>();
 
-        // build heap fresh each time (transfer)
-        transferToHeapArray();
-
         int totalMinutes = (int) Math.round(dailyMaxHours * 60.0);
-        int remaining = totalMinutes;
+        int remainingMinutes = totalMinutes;
 
         int sinceBreak = 0;
         String timeCursor = startTime;
 
         List<ScheduleItem> out = new ArrayList<>();
 
-        // ✅ HARD GUARD: prevent infinite loop
+        // window size (how many rotating subjects to consider each study block)
+        int windowSize = Math.min(3, Math.max(1, store.cll.size()));
+
         int guard = 0;
-        int guardMax = 2000;
+        int guardMax = 3000;
 
-        while (remaining > 0 && !store.heap.isEmpty()) {
-
+        while (remainingMinutes > 0) {
             if (guard++ > guardMax) break;
 
-            // break rule
-            if (sinceBreak >= breakEvery && remaining > 0) {
-                int bd = Math.min(breakDuration, remaining);
-
-                // ✅ must reduce time
+            // breaks
+            if (sinceBreak >= breakEvery && remainingMinutes > 0) {
+                int bd = Math.min(breakDuration, remainingMinutes);
                 if (bd <= 0) bd = 5;
-
                 out.add(ScheduleItem.brk(timeCursor, bd));
                 timeCursor = addMinutes(timeCursor, bd);
-                remaining -= bd;
+                remainingMinutes -= bd;
                 sinceBreak = 0;
                 continue;
             }
 
-            Subject top = store.heap.extractMax();
-            if (top == null) break;
+            // ✅ pick next study subject fairly:
+            // 1) get rotating window from CLL
+            // 2) push window into heap
+            // 3) extract best by score
+            store.heap.clear();
+            List<Subject> window = store.cll.nextSubjectsWindow(windowSize);
 
-            int subjectDuration = top.getDurationMinutes();
-            if (subjectDuration <= 0) subjectDuration = 30; // default
+            // insert only subjects with remaining topics
+            for (Subject s : window) {
+                if (s.remainingTopics() > 0) store.heap.insert(s);
+            }
 
-            int study = Math.min(subjectDuration, remaining);
+            Subject chosen = null;
+            Subject best = null;
 
-            // ✅ must reduce time
+            // extract max by our custom logic: we will manually scan heap array by score
+            // (since heap comparator is by priority; we want score now)
+            List<Subject> candidates = store.heap.asArray();
+            if (!candidates.isEmpty()) {
+                best = candidates.get(0);
+                double bestScore = score(best);
+                for (Subject c : candidates) {
+                    double sc = score(c);
+                    if (sc > bestScore) {
+                        bestScore = sc;
+                        best = c;
+                    }
+                }
+                chosen = best;
+            }
+
+            if (chosen == null) break;
+
+            int subjectDuration = chosen.getDurationMinutes();
+            if (subjectDuration <= 0) subjectDuration = 30;
+
+            int study = Math.min(subjectDuration, remainingMinutes);
             if (study <= 0) break;
 
-            out.add(ScheduleItem.study(timeCursor, study, top));
+            out.add(ScheduleItem.study(timeCursor, study, chosen));
             timeCursor = addMinutes(timeCursor, study);
-            remaining -= study;
+            remainingMinutes -= study;
             sinceBreak += study;
 
-            // put back into heap to allow repeating (tool behavior)
-            store.heap.insert(top);
+            // ✅ move CLL current close to next after chosen (better rotation)
+            store.cll.setCurrentById(chosen.getId());
+            store.cll.next(); // advance once after chosen
         }
 
         return out;
@@ -146,7 +184,7 @@ public class PlannerService {
         return String.format("%02d:%02d", nh, nm);
     }
 
-    // ---- MISSED (simple) ----
+    // ---- MISSED ----
     public void markMissed(String subjectId) {
         store.missed.add(subjectId);
     }

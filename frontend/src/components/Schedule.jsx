@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { plannerApi } from "../api/plannerApi";
 
 function normalizeSettings(s) {
@@ -16,9 +16,23 @@ function normalizeSettings(s) {
   return safe;
 }
 
-export default function Schedule({ settings, schedule, setSchedule, missed, setMissed }) {
+export default function Schedule({
+  settings,
+  schedule,
+  setSchedule,
+  missed,
+  setMissed,
+  subjects,
+  setSubjects,
+}) {
   const [busy, setBusy] = useState(false);
 
+  // timer state
+  const [runningIdx, setRunningIdx] = useState(null);
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  const intervalRef = useRef(null);
+
+  // load missed list once
   useEffect(() => {
     (async () => {
       try {
@@ -30,6 +44,22 @@ export default function Schedule({ settings, schedule, setSchedule, missed, setM
     })();
   }, [setMissed]);
 
+  // cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, []);
+
+  async function refreshSubjects() {
+    try {
+      const data = await plannerApi.getSubjects();
+      setSubjects(Array.isArray(data) ? data : []);
+    } catch {
+      setSubjects([]);
+    }
+  }
+
   async function generate() {
     setBusy(true);
     try {
@@ -39,20 +69,93 @@ export default function Schedule({ settings, schedule, setSchedule, missed, setM
       if (Array.isArray(data) && data.length > 0) {
         setSchedule(data);
       } else {
-        // do not wipe existing schedule if backend returned empty unexpectedly
         alert("No schedule generated. Check: subjects added + settings values.");
       }
     } catch (e) {
       alert(`Schedule generation failed: ${e.message}`);
-      // keep previous schedule
     } finally {
       setBusy(false);
     }
   }
 
+  function startTimer(idx) {
+    const item = schedule?.[idx];
+    if (!item || item.type !== "study") return;
+
+    // stop previous if running
+    stopTimer();
+
+    setRunningIdx(idx);
+    setSecondsLeft(Number(item.durationMinutes || 0) * 60);
+
+    intervalRef.current = setInterval(async () => {
+      setSecondsLeft((prev) => {
+        if (prev <= 1) {
+          // end
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+          // handle end in next tick
+          setTimeout(() => onSlotFinished(idx), 0);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  }
+
+  function stopTimer() {
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    intervalRef.current = null;
+    setRunningIdx(null);
+    setSecondsLeft(0);
+  }
+
+  function formatTime(sec) {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+
+  async function onSlotFinished(idx) {
+    const item = schedule?.[idx];
+    if (!item || item.type !== "study") return;
+
+    setRunningIdx(null);
+    setSecondsLeft(0);
+
+    // Ask user what happened
+    const ok = window.confirm(`Time finished for "${item.subjectName}".\n\nPress OK if you completed topics.\nPress Cancel if missed.`);
+    if (!ok) {
+      await markMissed(item);
+      return;
+    }
+
+    // ask completed topics count
+    const input = window.prompt(`How many topics did you complete for "${item.subjectName}"?`, "1");
+    const done = Math.max(0, Number(input || 0));
+
+    // update subject in backend
+    const current = subjects.find((s) => s.id === item.subjectId);
+    if (current) {
+      const updated = {
+        ...current,
+        completedTopics: Math.min(Number(current.totalTopics || 0), Number(current.completedTopics || 0) + done),
+      };
+      try {
+        await plannerApi.updateSubject(current.id, updated);
+        await refreshSubjects();
+      } catch {
+        // ignore, but try refresh
+        await refreshSubjects();
+      }
+    }
+
+    // regenerate schedule with new priorities
+    await generate();
+  }
+
   async function markMissed(item) {
     if (!item?.subjectId) return;
-
     try {
       await plannerApi.markMissed(item.subjectId);
       const data = await plannerApi.getMissed();
@@ -60,6 +163,33 @@ export default function Schedule({ settings, schedule, setSchedule, missed, setM
     } catch {
       // ignore
     }
+  }
+
+  async function completeNow(idx) {
+    const item = schedule?.[idx];
+    if (!item || item.type !== "study") return;
+
+    // if running, stop it
+    if (runningIdx === idx) stopTimer();
+
+    const input = window.prompt(`Complete now: How many topics did you finish for "${item.subjectName}"?`, "1");
+    const done = Math.max(0, Number(input || 0));
+
+    const current = subjects.find((s) => s.id === item.subjectId);
+    if (current) {
+      const updated = {
+        ...current,
+        completedTopics: Math.min(Number(current.totalTopics || 0), Number(current.completedTopics || 0) + done),
+      };
+      try {
+        await plannerApi.updateSubject(current.id, updated);
+        await refreshSubjects();
+      } catch {
+        await refreshSubjects();
+      }
+    }
+
+    await generate();
   }
 
   return (
@@ -81,6 +211,22 @@ export default function Schedule({ settings, schedule, setSchedule, missed, setM
             {busy ? "Generating..." : "Generate Schedule"}
           </button>
         </div>
+      </div>
+
+      {/* Timer bar */}
+      <div className="rounded-3xl border bg-white p-5 shadow-sm">
+        <div className="text-sm font-semibold text-slate-900">Session Timer</div>
+        <div className="mt-1 text-sm text-slate-500">
+          {runningIdx === null ? "No active session." : `Running: #${runningIdx + 1} (${formatTime(secondsLeft)})`}
+        </div>
+        {runningIdx !== null ? (
+          <button
+            onClick={stopTimer}
+            className="mt-3 rounded-2xl border px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Stop
+          </button>
+        ) : null}
       </div>
 
       <div className="rounded-3xl border bg-white p-6 shadow-sm">
@@ -112,14 +258,31 @@ export default function Schedule({ settings, schedule, setSchedule, missed, setM
                   <td className="py-3 text-slate-700">{s.durationMinutes} min</td>
                   <td className="py-3 text-slate-700">{s.type === "study" ? s.subjectName : "-"}</td>
                   <td className="py-3 text-slate-700">{s.type === "study" ? `${s.priority}/5` : "-"}</td>
+
                   <td className="py-3">
                     {s.type === "study" ? (
-                      <button
-                        onClick={() => markMissed(s)}
-                        className="rounded-2xl border px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-                      >
-                        Mark Missed
-                      </button>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={() => startTimer(idx)}
+                          className="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
+                        >
+                          Start
+                        </button>
+
+                        <button
+                          onClick={() => completeNow(idx)}
+                          className="rounded-2xl border px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                        >
+                          Complete
+                        </button>
+
+                        <button
+                          onClick={() => markMissed(s)}
+                          className="rounded-2xl border px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                        >
+                          Missed
+                        </button>
+                      </div>
                     ) : null}
                   </td>
                 </tr>

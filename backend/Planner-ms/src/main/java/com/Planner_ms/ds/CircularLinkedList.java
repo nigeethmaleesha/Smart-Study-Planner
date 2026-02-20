@@ -36,6 +36,20 @@ public class CircularLinkedList {
         return current.data;
     }
 
+    // ✅ NEW: set current pointer by subject id
+    public boolean setCurrentById(String id) {
+        if (isEmpty()) return false;
+        CLLNode t = head;
+        do {
+            if (t.data.getId().equals(id)) {
+                current = t;
+                return true;
+            }
+            t = t.next;
+        } while (t != head);
+        return false;
+    }
+
     public Subject findById(String id) {
         if (isEmpty()) return null;
         CLLNode t = head;
@@ -86,6 +100,25 @@ public class CircularLinkedList {
             out.add(t.data);
             t = t.next;
         } while (t != head);
+        return out;
+    }
+
+    // ✅ NEW: get a rotating window of subjects (fairness)
+    public List<Subject> nextSubjectsWindow(int windowSize) {
+        List<Subject> out = new ArrayList<>();
+        if (isEmpty() || windowSize <= 0) return out;
+
+        CLLNode t = (current == null) ? head : current;
+        int count = 0;
+        while (count < windowSize) {
+            out.add(t.data);
+            t = t.next;
+            count++;
+            if (t == null) break;
+        }
+
+        // advance the current pointer by windowSize for rotation
+        current = t;
         return out;
     }
 }

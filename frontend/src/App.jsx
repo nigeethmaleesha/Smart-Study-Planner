@@ -28,10 +28,11 @@ function normalizeSettings(s) {
     breakDurationMinutes: Number(s?.breakDurationMinutes ?? DEFAULT_SETTINGS.breakDurationMinutes),
   };
 
+  // safety guards (avoid 0 / NaN)
   if (!safe.startTime) safe.startTime = "08:00";
-  if (safe.dailyMaxHours <= 0) safe.dailyMaxHours = 2;
-  if (safe.breakEveryMinutes < 15) safe.breakEveryMinutes = 50;
-  if (safe.breakDurationMinutes < 5) safe.breakDurationMinutes = 10;
+  if (!Number.isFinite(safe.dailyMaxHours) || safe.dailyMaxHours <= 0) safe.dailyMaxHours = 2;
+  if (!Number.isFinite(safe.breakEveryMinutes) || safe.breakEveryMinutes < 15) safe.breakEveryMinutes = 50;
+  if (!Number.isFinite(safe.breakDurationMinutes) || safe.breakDurationMinutes < 5) safe.breakDurationMinutes = 10;
 
   return safe;
 }
@@ -47,9 +48,10 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [apiError, setApiError] = useState("");
 
-  // Load localStorage once (safe merge)
+  // Load from localStorage (safe merge)
   useEffect(() => {
     const saved = loadState();
+
     if (saved?.settings) setSettings({ ...DEFAULT_SETTINGS, ...saved.settings });
     if (saved?.subjects) setSubjects(saved.subjects);
     if (saved?.schedule) setSchedule(saved.schedule);
@@ -83,7 +85,6 @@ export default function App() {
     return { totalTopics, completedTopics, remainingTopics, pct, studyMin, breakMin };
   }, [subjects, schedule]);
 
-  // ✅ Correct backend generation call (POST /api/schedule/generate)
   async function generateSchedule() {
     setApiError("");
 
@@ -92,7 +93,7 @@ export default function App() {
       return;
     }
 
-    // Validate subjects (same as yours)
+    // subject validation (your original checks)
     for (const s of subjects) {
       if (!s.name?.trim()) return setApiError("Subject name cannot be empty.");
       if (Number(s.durationMinutes) <= 0) return setApiError("Duration must be > 0.");
@@ -104,13 +105,13 @@ export default function App() {
 
     setLoading(true);
     try {
-      // ✅ Send only ScheduleRequest (backend expects this)
+      // ✅ Backend expects ScheduleRequest ONLY
       const payload = normalizeSettings(settings);
 
       const data = await plannerApi.generateSchedule(payload);
 
       if (!Array.isArray(data) || data.length === 0) {
-        setApiError("No schedule generated. Check planner settings and ensure subjects exist in backend.");
+        setApiError("No schedule generated. Check planner settings + make sure subjects exist in backend.");
         return;
       }
 
@@ -216,7 +217,7 @@ export default function App() {
             {tab === "Schedule" && (
               <Panel title="Daily Schedule" subtitle="Generated sessions from backend. Mark missed, update progress.">
                 <Schedule
-                  settings={settings}              // ✅ IMPORTANT
+                  settings={settings}          // ✅ IMPORTANT
                   schedule={schedule}
                   setSchedule={setSchedule}
                   missed={missed}
