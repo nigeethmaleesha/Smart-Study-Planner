@@ -28,7 +28,6 @@ function normalizeSettings(s) {
     breakDurationMinutes: Number(s?.breakDurationMinutes ?? DEFAULT_SETTINGS.breakDurationMinutes),
   };
 
-  // safety guards (avoid 0 / NaN)
   if (!safe.startTime) safe.startTime = "08:00";
   if (!Number.isFinite(safe.dailyMaxHours) || safe.dailyMaxHours <= 0) safe.dailyMaxHours = 2;
   if (!Number.isFinite(safe.breakEveryMinutes) || safe.breakEveryMinutes < 15) safe.breakEveryMinutes = 50;
@@ -45,25 +44,28 @@ export default function App() {
   const [schedule, setSchedule] = useState([]);
   const [missed, setMissed] = useState([]);
 
+  // ✅ Actual planner: day starts once, schedule auto builds
+  const [dayStarted, setDayStarted] = useState(false);
+
   const [loading, setLoading] = useState(false);
   const [apiError, setApiError] = useState("");
 
-  // Load from localStorage (safe merge)
+  // Load from localStorage
   useEffect(() => {
     const saved = loadState();
-
     if (saved?.settings) setSettings({ ...DEFAULT_SETTINGS, ...saved.settings });
     if (saved?.subjects) setSubjects(saved.subjects);
     if (saved?.schedule) setSchedule(saved.schedule);
     if (saved?.missed) setMissed(saved.missed);
+    if (typeof saved?.dayStarted === "boolean") setDayStarted(saved.dayStarted);
   }, []);
 
   // Save to localStorage
   useEffect(() => {
-    saveState({ settings, subjects, schedule, missed });
-  }, [settings, subjects, schedule, missed]);
+    saveState({ settings, subjects, schedule, missed, dayStarted });
+  }, [settings, subjects, schedule, missed, dayStarted]);
 
-  const canGenerate = useMemo(() => {
+  const canStartDay = useMemo(() => {
     if (!subjects.length) return false;
     return subjects.some((s) => Number(s.totalTopics || 0) - Number(s.completedTopics || 0) > 0);
   }, [subjects]);
@@ -71,7 +73,6 @@ export default function App() {
   const stats = useMemo(() => {
     const totalTopics = subjects.reduce((a, s) => a + Number(s.totalTopics || 0), 0);
     const completedTopics = subjects.reduce((a, s) => a + Number(s.completedTopics || 0), 0);
-    const remainingTopics = Math.max(0, totalTopics - completedTopics);
     const pct = totalTopics > 0 ? Math.round((completedTopics / totalTopics) * 100) : 0;
 
     const studyMin = (schedule || [])
@@ -82,22 +83,21 @@ export default function App() {
       .filter((x) => x.type === "break")
       .reduce((sum, x) => sum + Number(x.durationMinutes || 0), 0);
 
-    return { totalTopics, completedTopics, remainingTopics, pct, studyMin, breakMin };
+    return { pct, studyMin, breakMin };
   }, [subjects, schedule]);
 
   async function generateSchedule() {
     setApiError("");
 
-    if (!canGenerate) {
-      setApiError("Add at least one subject with remaining topics to generate a schedule.");
+    if (!canStartDay) {
+      setApiError("Add at least one subject with remaining topics.");
       return;
     }
 
-    // subject validation (your original checks)
+    // basic validation
     for (const s of subjects) {
       if (!s.name?.trim()) return setApiError("Subject name cannot be empty.");
       if (Number(s.durationMinutes) <= 0) return setApiError("Duration must be > 0.");
-      if (Number(s.priority) < 1 || Number(s.priority) > 5) return setApiError("Priority must be 1–5.");
       if (Number(s.totalTopics) < 1) return setApiError("Total topics must be >= 1.");
       if (Number(s.completedTopics) < 0 || Number(s.completedTopics) > Number(s.totalTopics))
         return setApiError("Completed topics must be between 0 and total topics.");
@@ -105,24 +105,43 @@ export default function App() {
 
     setLoading(true);
     try {
-      // ✅ Backend expects ScheduleRequest ONLY
-      const payload = normalizeSettings(settings);
+      // refresh subjects from backend (optional, helps with ID sync)
+      try {
+        const latest = await plannerApi.getSubjects();
+        if (Array.isArray(latest)) setSubjects(latest);
+      } catch {}
 
+      const payload = normalizeSettings(settings);
       const data = await plannerApi.generateSchedule(payload);
 
       if (!Array.isArray(data) || data.length === 0) {
-        setApiError("No schedule generated. Check planner settings + make sure subjects exist in backend.");
+        setApiError("No schedule generated. Check planner settings and subjects.");
         return;
       }
 
       setSchedule(data);
-      setMissed([]);
       setTab("Schedule");
     } catch (e) {
       setApiError(e.message || "Failed to generate schedule.");
     } finally {
       setLoading(false);
     }
+  }
+
+  // ✅ One-click practical start: Start Day => auto generate schedule
+  async function startDay() {
+    setApiError("");
+    setDayStarted(true);
+    setTab("Schedule");
+    await generateSchedule();
+  }
+
+  function resetDay() {
+    setApiError("");
+    setDayStarted(false);
+    setSchedule([]);
+    setMissed([]);
+    setTab("Planner");
   }
 
   return (
@@ -135,7 +154,7 @@ export default function App() {
               Smart Study Planner
             </h1>
             <p className="mt-1 text-sm text-slate-500">
-              Rotation (Circular LL) + Priority (Max Heap) handled in backend.
+              Practical planner (Start Day → plan → current session).
             </p>
           </div>
 
@@ -148,13 +167,22 @@ export default function App() {
               </div>
             </div>
 
-            <button
-              onClick={generateSchedule}
-              disabled={!canGenerate || loading}
-              className="inline-flex items-center justify-center rounded-2xl bg-blue-600 px-5 py-3 text-white font-semibold shadow-sm hover:bg-blue-700 disabled:opacity-50 disabled:hover:bg-blue-600"
-            >
-              {loading ? "Generating..." : "Generate Schedule"}
-            </button>
+            {!dayStarted ? (
+              <button
+                onClick={startDay}
+                disabled={!canStartDay || loading}
+                className="inline-flex items-center justify-center rounded-2xl bg-green-600 px-5 py-3 text-white font-semibold shadow-sm hover:bg-green-700 disabled:opacity-50"
+              >
+                {loading ? "Starting..." : "Start Day"}
+              </button>
+            ) : (
+              <button
+                onClick={resetDay}
+                className="inline-flex items-center justify-center rounded-2xl border px-5 py-3 text-slate-700 font-semibold hover:bg-slate-50"
+              >
+                Reset Day
+              </button>
+            )}
           </div>
         </div>
 
@@ -176,7 +204,11 @@ export default function App() {
               {TABS.map((t) => (
                 <button
                   key={t.key}
-                  onClick={() => setTab(t.key)}
+                  onClick={() => {
+                    // ✅ prevent opening Schedule before Start Day
+                    if (t.key === "Schedule" && !dayStarted) return setTab("Planner");
+                    setTab(t.key);
+                  }}
                   className={[
                     "w-full rounded-2xl px-4 py-3 text-left text-sm font-semibold transition",
                     tab === t.key
@@ -192,10 +224,10 @@ export default function App() {
             <div className="mt-6 rounded-2xl bg-slate-50 p-4">
               <div className="text-xs text-slate-500">Today overview</div>
               <div className="mt-2 grid grid-cols-2 gap-3">
+                <MiniStat label="Day" value={dayStarted ? "Started" : "Not"} />
                 <MiniStat label="Subjects" value={subjects.length} />
                 <MiniStat label="Missed" value={missed.length} />
                 <MiniStat label="Study min" value={stats.studyMin} />
-                <MiniStat label="Break min" value={stats.breakMin} />
               </div>
             </div>
           </aside>
@@ -203,33 +235,34 @@ export default function App() {
           {/* Main */}
           <section className="space-y-5">
             {tab === "Subjects" && (
-              <Panel title="Subjects" subtitle="Add and manage subjects, topics, and priorities.">
+              <Panel title="Subjects" subtitle="Add and manage subjects, topics, and durations.">
                 <Subjects subjects={subjects} setSubjects={setSubjects} />
               </Panel>
             )}
 
             {tab === "Planner" && (
-              <Panel title="Planner Settings" subtitle="Set time, breaks, and daily limits.">
+              <Panel title="Planner Settings" subtitle="Set start time, daily limits, and breaks.">
                 <PlannerSettings settings={settings} setSettings={setSettings} />
               </Panel>
             )}
 
-            {tab === "Schedule" && (
-              <Panel title="Daily Schedule" subtitle="Generated sessions from backend. Mark missed, update progress.">
+            {tab === "Schedule" && dayStarted && (
+              <Panel title="Daily Planner" subtitle="Current session view + skip/complete + auto re-plan.">
                 <Schedule
-                  settings={settings}          // ✅ IMPORTANT
+                  settings={settings}
                   schedule={schedule}
                   setSchedule={setSchedule}
                   missed={missed}
                   setMissed={setMissed}
                   subjects={subjects}
                   setSubjects={setSubjects}
+                  dayStarted={dayStarted}
                 />
               </Panel>
             )}
 
             {tab === "Report" && (
-              <Panel title="Daily Report" subtitle="Summary based on sessions, missed items, and topic progress.">
+              <Panel title="Daily Report" subtitle="Summary of progress + missed sessions.">
                 <Report schedule={schedule} subjects={subjects} missed={missed} />
               </Panel>
             )}

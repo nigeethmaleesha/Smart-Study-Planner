@@ -1,37 +1,34 @@
 package com.Planner_ms.model;
 
 public class ScheduleItem {
-    private String type;            // "study" or "break"
-    private String startTime;       // "HH:mm"
+    private String type; // "study" or "break"
+    private String startTime;
     private int durationMinutes;
 
-    // study fields
+    // study-only fields
     private String subjectId;
     private String subjectName;
     private int priority;
 
-    public ScheduleItem() {}
-
     public static ScheduleItem study(String startTime, int duration, Subject s) {
-        ScheduleItem it = new ScheduleItem();
-        it.type = "study";
-        it.startTime = startTime;
-        it.durationMinutes = duration;
-        it.subjectId = s.getId();
-        it.subjectName = s.getName();
-        it.priority = s.getPriority();
-        return it;
+        ScheduleItem item = new ScheduleItem();
+        item.type = "study";
+        item.startTime = startTime;
+        item.durationMinutes = duration;
+        item.subjectId = s.getId();
+        item.subjectName = s.getName();
+        item.priority = s.getPriority();
+        return item;
     }
 
     public static ScheduleItem brk(String startTime, int duration) {
-        ScheduleItem it = new ScheduleItem();
-        it.type = "break";
-        it.startTime = startTime;
-        it.durationMinutes = duration;
-        return it;
+        ScheduleItem item = new ScheduleItem();
+        item.type = "break";
+        item.startTime = startTime;
+        item.durationMinutes = duration;
+        return item;
     }
 
-    // getters/setters
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
 
