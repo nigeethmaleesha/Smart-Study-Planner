@@ -30,13 +30,23 @@ export default function Schedule({
   const [secondsLeft, setSecondsLeft] = useState(0);
   const intervalRef = useRef(null);
 
+  // ✅ Guard to prevent double "time up"
+  const timeUpHandledRef = useRef(false);
+
   const current = schedule?.[currentIndex] || null;
   const next = schedule?.[currentIndex + 1] || null;
 
-  // Cleanup timer
+  // Cleanup timer on unmount
   useEffect(() => {
     return () => intervalRef.current && clearInterval(intervalRef.current);
   }, []);
+
+  // ✅ Reset "time up" guard when session changes
+  useEffect(() => {
+    timeUpHandledRef.current = false;
+    stopTimer(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIndex]);
 
   // Keep index valid when schedule length changes
   useEffect(() => {
@@ -79,36 +89,10 @@ export default function Schedule({
     if (reset) setSecondsLeft(0);
   }
 
-  function toggleTimer() {
-    if (!current) return;
-
-    if (running) {
-      stopTimer(false); // pause
-      return;
-    }
-
-    const startSeconds =
-      secondsLeft > 0 ? secondsLeft : Number(current.durationMinutes || 0) * 60;
-
-    setSecondsLeft(startSeconds);
-    setRunning(true);
-
-    intervalRef.current = setInterval(() => {
-      setSecondsLeft((prev) => {
-        if (prev <= 1) {
-          stopTimer(true);
-          moveToNextSession(); // auto-next when time ends
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-  }
-
   // ✅ Always moves to next if possible
   function moveToNextSession() {
     stopTimer(true);
-    if (!schedule?.length) return;
+    if (!schedule?.length) return currentIndex;
 
     const nextIdx = Math.min(currentIndex + 1, schedule.length - 1);
     setCurrentIndex(nextIdx);
@@ -132,6 +116,9 @@ export default function Schedule({
         const safeIdx = Math.min(keepIdx, data.length - 1);
         setSchedule(data);
         setCurrentIndex(safeIdx);
+      } else {
+        setSchedule([]);
+        setCurrentIndex(0);
       }
     } catch (e) {
       alert(`Rebuild failed: ${e.message}`);
@@ -140,18 +127,29 @@ export default function Schedule({
     }
   }
 
-  async function completeSession() {
+  /**
+   * ✅ Core function:
+   * Update completedTopics for the current study session.
+   * If moveNextAfter=true -> move to next session and keep it after rebuild
+   */
+  async function completeCurrentStudy(moveNextAfter = false) {
     if (!current || current.type !== "study") return;
 
     stopTimer(true);
+
+    alert(
+      "⏰ Time is up! Please enter completed topics, then we will move to the next session."
+    );
 
     const input = window.prompt(
       `How many topics did you complete for "${current.subjectName}"?`,
       "1"
     );
+
     const done = Math.max(0, Number(input || 0));
 
     const subj = subjects.find((s) => String(s.id) === String(current.subjectId));
+
     if (subj) {
       const updated = {
         ...subj,
@@ -167,30 +165,83 @@ export default function Schedule({
       await refreshSubjects();
     }
 
-    // keep same position (or you can move next if you want)
-    await regenerateScheduleKeepIndex(currentIndex);
+    let keepIdx = currentIndex;
+
+    if (moveNextAfter) {
+      keepIdx = schedule?.length
+        ? Math.min(currentIndex + 1, schedule.length - 1)
+        : currentIndex;
+
+      setCurrentIndex(keepIdx);
+    }
+
+    await regenerateScheduleKeepIndex(keepIdx);
   }
 
-  // ✅ FIXED Skip: move to next instantly AND keep that next after rebuild
+  function toggleTimer() {
+    if (!current) return;
+
+    if (running) {
+      stopTimer(false); // pause
+      return;
+    }
+
+    // ✅ Reset guard when starting
+    timeUpHandledRef.current = false;
+
+    const startSeconds =
+      secondsLeft > 0 ? secondsLeft : Number(current.durationMinutes || 0) * 60;
+
+    setSecondsLeft(startSeconds);
+    setRunning(true);
+
+    intervalRef.current = setInterval(() => {
+      setSecondsLeft((prev) => {
+        if (prev <= 1) {
+          // ✅ Prevent double firing
+          if (timeUpHandledRef.current) return 0;
+          timeUpHandledRef.current = true;
+
+          stopTimer(true);
+
+          if (current?.type === "study") {
+            setTimeout(() => {
+              completeCurrentStudy(true);
+            }, 0);
+          } else {
+            setTimeout(() => {
+              const nextIdx = moveToNextSession();
+              regenerateScheduleKeepIndex(nextIdx);
+            }, 0);
+          }
+
+          return 0;
+        }
+
+        return prev - 1;
+      });
+    }, 1000);
+  }
+
+  async function completeSession() {
+    await completeCurrentStudy(false);
+  }
+
   async function skipSession() {
     if (!current || current.type !== "study") return;
 
-    // 1) calculate next index FIRST
     const nextIdx = schedule?.length
       ? Math.min(currentIndex + 1, schedule.length - 1)
       : currentIndex;
 
-    // 2) move UI to next instantly
     stopTimer(true);
     setCurrentIndex(nextIdx);
 
-    // 3) mark missed in backend
     try {
       await plannerApi.markMissed(current.subjectId);
     } catch {}
     await refreshMissed();
 
-    // 4) rebuild schedule but KEEP next index (so it won't jump back)
     await regenerateScheduleKeepIndex(nextIdx);
   }
 
@@ -207,7 +258,9 @@ export default function Schedule({
       <div className="rounded-3xl border bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
-            <div className="text-xs font-semibold text-slate-500">CURRENT SESSION</div>
+            <div className="text-xs font-semibold text-slate-500">
+              CURRENT SESSION
+            </div>
 
             {!current ? (
               <div className="mt-2 text-slate-700">
@@ -220,7 +273,8 @@ export default function Schedule({
                 </div>
 
                 <div className="mt-1 text-sm text-slate-600">
-                  Start: {current.startTime} • Duration: {current.durationMinutes} min
+                  Start: {current.startTime} • Duration: {current.durationMinutes}{" "}
+                  min
                 </div>
 
                 <div className="mt-3 text-sm font-semibold text-slate-900">
@@ -277,7 +331,10 @@ export default function Schedule({
         {/* small rebuild link */}
         <div className="mt-4 flex items-center justify-between text-sm">
           <div className="text-slate-600">
-            Missed: <span className="font-semibold text-slate-900">{missed?.length || 0}</span>
+            Missed:{" "}
+            <span className="font-semibold text-slate-900">
+              {missed?.length || 0}
+            </span>
           </div>
 
           <button
@@ -319,7 +376,10 @@ export default function Schedule({
               {(schedule || []).map((s, idx) => (
                 <tr
                   key={idx}
-                  className={["border-t", idx === currentIndex ? "bg-slate-50" : ""].join(" ")}
+                  className={[
+                    "border-t",
+                    idx === currentIndex ? "bg-slate-50" : "",
+                  ].join(" ")}
                   onClick={() => {
                     stopTimer(true);
                     setCurrentIndex(idx);
@@ -330,7 +390,9 @@ export default function Schedule({
                   <td className="py-3 font-semibold text-slate-900">{s.type}</td>
                   <td className="py-3 text-slate-700">{s.startTime}</td>
                   <td className="py-3 text-slate-700">{s.durationMinutes} min</td>
-                  <td className="py-3 text-slate-700">{s.type === "study" ? s.subjectName : "-"}</td>
+                  <td className="py-3 text-slate-700">
+                    {s.type === "study" ? s.subjectName : "-"}
+                  </td>
                 </tr>
               ))}
 
