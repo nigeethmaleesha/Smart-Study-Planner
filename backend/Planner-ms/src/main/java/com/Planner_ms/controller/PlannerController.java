@@ -4,6 +4,7 @@ import com.Planner_ms.dto.ScheduleRequest;
 import com.Planner_ms.model.ScheduleItem;
 import com.Planner_ms.model.Subject;
 import com.Planner_ms.services.PlannerService;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -19,49 +20,41 @@ public class PlannerController {
         this.service = service;
     }
 
-    // ---- Subjects ----
+    // -------- Subjects --------
+    @GetMapping("/subjects")
+    public List<Subject> getSubjects() {
+        return service.listSubjects();
+    }
+
     @PostMapping("/subjects")
     public Subject addSubject(@RequestBody Subject s) {
         return service.addSubject(s);
     }
 
-    @GetMapping("/subjects")
-    public List<Subject> listSubjects() {
-        return service.listSubjects();
-    }
-
     @PutMapping("/subjects/{id}")
-    public Subject updateSubject(@PathVariable String id, @RequestBody Subject patch) {
-        return service.updateSubject(id, patch);
+    public ResponseEntity<Subject> update(@PathVariable String id, @RequestBody Subject s) {
+        Subject updated = service.updateSubject(id, s);
+        if (updated == null) return ResponseEntity.notFound().build();
+        return ResponseEntity.ok(updated);
     }
 
     @DeleteMapping("/subjects/{id}")
-    public String delete(@PathVariable String id) {
-        return service.deleteSubject(id) ? "Deleted" : "Not found";
+    public ResponseEntity<Void> delete(@PathVariable String id) {
+        boolean ok = service.deleteSubject(id);
+        return ok ? ResponseEntity.ok().build() : ResponseEntity.notFound().build();
     }
 
-    // ---- Transfer / Heap ----
-    @PostMapping("/transfer/cll-to-heap")
-    public List<Subject> transferToHeapArray() {
-        return service.transferToHeapArray();
-    }
-
-    @GetMapping("/heap")
-    public List<Subject> heapArray() {
-        return service.heapArray();
-    }
-
-    // ---- Schedule ----
+    // -------- Schedule --------
     @PostMapping("/schedule/generate")
     public List<ScheduleItem> generate(@RequestBody ScheduleRequest req) {
         return service.generateSchedule(req);
     }
 
-    // ---- Missed ----
-    @PostMapping("/missed/{subjectId}")
-    public String missed(@PathVariable String subjectId) {
-        service.markMissed(subjectId);
-        return "Marked missed";
+    // -------- Missed --------
+    @PostMapping("/missed/{id}")
+    public ResponseEntity<Void> missed(@PathVariable String id) {
+        service.markMissed(id);
+        return ResponseEntity.ok().build();
     }
 
     @GetMapping("/missed")

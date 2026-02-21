@@ -1,8 +1,8 @@
 package com.Planner_ms.dto;
 
 public class ScheduleRequest {
-    private String startTime;               // "HH:mm"
-    private double dailyMaxHours;           // can be 2.5
+    private String startTime;
+    private double dailyMaxHours;
     private int breakEveryMinutes;
     private int breakDurationMinutes;
 

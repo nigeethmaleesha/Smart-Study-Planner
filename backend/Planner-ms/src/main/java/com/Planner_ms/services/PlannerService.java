@@ -19,7 +19,8 @@ public class PlannerService {
         this.store = store;
     }
 
-    // ---- SUBJECTS (CLL) ----
+    // ---------------- SUBJECTS ----------------
+
     public Subject addSubject(Subject s) {
         if (s.getId() == null || s.getId().isBlank()) {
             s.setId(UUID.randomUUID().toString());
@@ -32,56 +33,52 @@ public class PlannerService {
         return store.cll.toList();
     }
 
-    public boolean deleteSubject(String id) {
-        return store.cll.removeById(id);
-    }
-
     public Subject updateSubject(String id, Subject patch) {
         Subject s = store.cll.findById(id);
         if (s == null) return null;
 
-        s.setName(patch.getName());
+        if (patch.getName() != null) s.setName(patch.getName());
         s.setDurationMinutes(patch.getDurationMinutes());
         s.setPriority(patch.getPriority());
         s.setTotalTopics(patch.getTotalTopics());
         s.setCompletedTopics(patch.getCompletedTopics());
         s.setTargetDate(patch.getTargetDate());
+
+        // if completed, remove from missed list
+        if (s.remainingTopics() <= 0) {
+            store.missed.remove(id);
+        }
+
         return s;
     }
 
-    // ---- TRANSFER CLL -> HEAP ----
-    public List<Subject> transferToHeapArray() {
-        store.heap.clear();
-        for (Subject s : store.cll.toList()) {
-            store.heap.insert(s);
-        }
-        return store.heap.asArray();
+    public boolean deleteSubject(String id) {
+        store.missed.remove(id);
+        return store.cll.removeById(id);
     }
 
-    public List<Subject> heapArray() {
-        return store.heap.asArray();
+    // ---------------- MISSED ----------------
+
+    public void markMissed(String subjectId) {
+        Subject s = store.cll.findById(subjectId);
+        if (s == null) return;
+        if (s.remainingTopics() <= 0) return; // don’t mark completed as missed
+
+        store.missed.add(subjectId);
     }
 
-    // ✅ Score based on priority + remaining + completion ratio
-    private double score(Subject s) {
-        int remaining = s.remainingTopics();
-        int total = Math.max(1, s.getTotalTopics());
-        double completionRatio = (double) s.getCompletedTopics() / total; // 0..1
-
-        // weights you can tune
-        double wPriority = 100.0;
-        double wRemaining = 10.0;
-        double wNotDone = 80.0; // encourages subjects not yet completed
-
-        return (s.getPriority() * wPriority)
-                + (remaining * wRemaining)
-                + ((1.0 - completionRatio) * wNotDone);
+    public List<String> missedList() {
+        return new ArrayList<>(store.missed);
     }
 
-    // ---- SCHEDULE GENERATION (CLL fairness + Heap selection) ----
+    // ---------------- SCHEDULE (CLL ONLY) ----------------
+
     public List<ScheduleItem> generateSchedule(ScheduleRequest req) {
+        if (store.cll.isEmpty()) return new ArrayList<>();
 
-        String startTime = (req.getStartTime() == null || req.getStartTime().isBlank()) ? "08:00" : req.getStartTime();
+        // Defaults + validation
+        String startTime = (req.getStartTime() == null || req.getStartTime().isBlank())
+                ? "08:00" : req.getStartTime();
 
         double dailyMaxHours = req.getDailyMaxHours();
         if (dailyMaxHours <= 0) dailyMaxHours = 2;
@@ -92,29 +89,27 @@ public class PlannerService {
         int breakDuration = req.getBreakDurationMinutes();
         if (breakDuration < 5) breakDuration = 10;
 
-        if (store.cll.isEmpty()) return new ArrayList<>();
+        // Clean missed list (remove deleted/completed subjects)
+        store.missed.removeIf(id -> {
+            Subject x = store.cll.findById(id);
+            return x == null || x.remainingTopics() <= 0;
+        });
 
-        int totalMinutes = (int) Math.round(dailyMaxHours * 60.0);
-        int remainingMinutes = totalMinutes;
-
-        int sinceBreak = 0;
+        int remainingMinutes = (int) Math.round(dailyMaxHours * 60.0);
         String timeCursor = startTime;
+        int sinceBreak = 0;
 
         List<ScheduleItem> out = new ArrayList<>();
 
-        // window size (how many rotating subjects to consider each study block)
-        int windowSize = Math.min(3, Math.max(1, store.cll.size()));
-
+        // Guard prevents infinite loop
         int guard = 0;
         int guardMax = 3000;
 
-        while (remainingMinutes > 0) {
-            if (guard++ > guardMax) break;
+        while (remainingMinutes > 0 && guard++ < guardMax) {
 
-            // breaks
-            if (sinceBreak >= breakEvery && remainingMinutes > 0) {
+            // Add break if needed
+            if (sinceBreak >= breakEvery) {
                 int bd = Math.min(breakDuration, remainingMinutes);
-                if (bd <= 0) bd = 5;
                 out.add(ScheduleItem.brk(timeCursor, bd));
                 timeCursor = addMinutes(timeCursor, bd);
                 remainingMinutes -= bd;
@@ -122,74 +117,71 @@ public class PlannerService {
                 continue;
             }
 
-            // ✅ pick next study subject fairly:
-            // 1) get rotating window from CLL
-            // 2) push window into heap
-            // 3) extract best by score
-            store.heap.clear();
-            List<Subject> window = store.cll.nextSubjectsWindow(windowSize);
-
-            // insert only subjects with remaining topics
-            for (Subject s : window) {
-                if (s.remainingTopics() > 0) store.heap.insert(s);
-            }
-
-            Subject chosen = null;
-            Subject best = null;
-
-            // extract max by our custom logic: we will manually scan heap array by score
-            // (since heap comparator is by priority; we want score now)
-            List<Subject> candidates = store.heap.asArray();
-            if (!candidates.isEmpty()) {
-                best = candidates.get(0);
-                double bestScore = score(best);
-                for (Subject c : candidates) {
-                    double sc = score(c);
-                    if (sc > bestScore) {
-                        bestScore = sc;
-                        best = c;
-                    }
-                }
-                chosen = best;
-            }
-
+            Subject chosen = pickNextSubjectCLL();
             if (chosen == null) break;
 
-            int subjectDuration = chosen.getDurationMinutes();
-            if (subjectDuration <= 0) subjectDuration = 30;
+            int dur = chosen.getDurationMinutes();
+            if (dur <= 0) dur = 30;
 
-            int study = Math.min(subjectDuration, remainingMinutes);
+            int study = Math.min(dur, remainingMinutes);
             if (study <= 0) break;
 
             out.add(ScheduleItem.study(timeCursor, study, chosen));
+
             timeCursor = addMinutes(timeCursor, study);
             remainingMinutes -= study;
             sinceBreak += study;
 
-            // ✅ move CLL current close to next after chosen (better rotation)
-            store.cll.setCurrentById(chosen.getId());
-            store.cll.next(); // advance once after chosen
+            // Once scheduled, remove from missed (so it doesn’t keep repeating forever)
+            store.missed.remove(chosen.getId());
+
+            // Rotate circular list forward
+            store.cll.next();
         }
 
         return out;
+    }
+
+    /**
+     * Practical CLL picker:
+     * 1) Missed subjects first (reinsert soon)
+     * 2) Otherwise follow normal circular rotation
+     * 3) Skip completed subjects
+     */
+    private Subject pickNextSubjectCLL() {
+        List<Subject> all = store.cll.toList();
+        if (all.isEmpty()) return null;
+
+        // 1) missed first
+        for (String id : store.missed) {
+            Subject m = store.cll.findById(id);
+            if (m != null && m.remainingTopics() > 0) {
+                store.cll.setCurrentById(id);
+                return m;
+            }
+        }
+
+        // 2) normal rotation
+        Subject current = store.cll.getCurrent(); // ✅ your CLL method name
+        int tries = 0;
+
+        while (current != null && current.remainingTopics() <= 0 && tries++ < all.size()) {
+            store.cll.next();
+            current = store.cll.getCurrent();
+        }
+
+        return current;
     }
 
     private String addMinutes(String hhmm, int mins) {
         String[] p = hhmm.split(":");
         int h = Integer.parseInt(p[0]);
         int m = Integer.parseInt(p[1]);
+
         int total = h * 60 + m + mins;
         int nh = (total / 60) % 24;
         int nm = total % 60;
+
         return String.format("%02d:%02d", nh, nm);
-    }
-
-    // ---- MISSED ----
-    public void markMissed(String subjectId) {
-        store.missed.add(subjectId);
-    }
-
-    public List<String> missedList() {
-        return store.missed;
     }
 }
