@@ -1,4 +1,4 @@
-const KEY = "smart-study-planner-v2";
+const KEY = "smart-study-planner-v3";
 
 export function loadState() {
   try {
@@ -12,7 +12,5 @@ export function loadState() {
 export function saveState(state) {
   try {
     localStorage.setItem(KEY, JSON.stringify(state));
-  } catch {
-    // ignore
-  }
+  } catch {}
 }

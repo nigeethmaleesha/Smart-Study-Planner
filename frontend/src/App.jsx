@@ -3,10 +3,12 @@ import PlannerSettings from "./components/PlannerSettings";
 import Subjects from "./components/Subjects";
 import Schedule from "./components/Schedule";
 import Report from "./components/Report";
+import Dashboard from "./components/Dashboard";
 import { loadState, saveState } from "./lib/storage";
 import { plannerApi } from "./api/plannerApi";
 
 const TABS = [
+  { key: "Dashboard", label: "Dashboard" },
   { key: "Subjects", label: "Subjects" },
   { key: "Planner", label: "Planner" },
   { key: "Schedule", label: "Schedule" },
@@ -37,33 +39,42 @@ function normalizeSettings(s) {
 }
 
 export default function App() {
-  const [tab, setTab] = useState("Subjects");
+  const [tab, setTab] = useState("Dashboard");
 
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [subjects, setSubjects] = useState([]);
   const [schedule, setSchedule] = useState([]);
   const [missed, setMissed] = useState([]);
 
-  // ✅ Actual planner: day starts once, schedule auto builds
   const [dayStarted, setDayStarted] = useState(false);
+
+  // NEW: missedLog counts every skip click
+  const [missedLog, setMissedLog] = useState([]);
+
+  // NEW: snapshot of completedTopics at start of day
+  const [daySnapshot, setDaySnapshot] = useState({});
+
+  // NEW: daily report history (latest first)
+  const [reports, setReports] = useState([]);
 
   const [loading, setLoading] = useState(false);
   const [apiError, setApiError] = useState("");
 
-  // Load from localStorage
   useEffect(() => {
     const saved = loadState();
     if (saved?.settings) setSettings({ ...DEFAULT_SETTINGS, ...saved.settings });
     if (saved?.subjects) setSubjects(saved.subjects);
     if (saved?.schedule) setSchedule(saved.schedule);
     if (saved?.missed) setMissed(saved.missed);
+    if (saved?.missedLog) setMissedLog(saved.missedLog);
+    if (saved?.daySnapshot) setDaySnapshot(saved.daySnapshot);
+    if (saved?.reports) setReports(saved.reports);
     if (typeof saved?.dayStarted === "boolean") setDayStarted(saved.dayStarted);
   }, []);
 
-  // Save to localStorage
   useEffect(() => {
-    saveState({ settings, subjects, schedule, missed, dayStarted });
-  }, [settings, subjects, schedule, missed, dayStarted]);
+    saveState({ settings, subjects, schedule, missed, missedLog, daySnapshot, reports, dayStarted });
+  }, [settings, subjects, schedule, missed, missedLog, daySnapshot, reports, dayStarted]);
 
   const canStartDay = useMemo(() => {
     if (!subjects.length) return false;
@@ -75,13 +86,8 @@ export default function App() {
     const completedTopics = subjects.reduce((a, s) => a + Number(s.completedTopics || 0), 0);
     const pct = totalTopics > 0 ? Math.round((completedTopics / totalTopics) * 100) : 0;
 
-    const studyMin = (schedule || [])
-      .filter((x) => x.type === "study")
-      .reduce((sum, x) => sum + Number(x.durationMinutes || 0), 0);
-
-    const breakMin = (schedule || [])
-      .filter((x) => x.type === "break")
-      .reduce((sum, x) => sum + Number(x.durationMinutes || 0), 0);
+    const studyMin = (schedule || []).filter((x) => x.type === "study").reduce((sum, x) => sum + Number(x.durationMinutes || 0), 0);
+    const breakMin = (schedule || []).filter((x) => x.type === "break").reduce((sum, x) => sum + Number(x.durationMinutes || 0), 0);
 
     return { pct, studyMin, breakMin };
   }, [subjects, schedule]);
@@ -94,18 +100,9 @@ export default function App() {
       return;
     }
 
-    // basic validation
-    for (const s of subjects) {
-      if (!s.name?.trim()) return setApiError("Subject name cannot be empty.");
-      if (Number(s.durationMinutes) <= 0) return setApiError("Duration must be > 0.");
-      if (Number(s.totalTopics) < 1) return setApiError("Total topics must be >= 1.");
-      if (Number(s.completedTopics) < 0 || Number(s.completedTopics) > Number(s.totalTopics))
-        return setApiError("Completed topics must be between 0 and total topics.");
-    }
-
     setLoading(true);
     try {
-      // refresh subjects from backend (optional, helps with ID sync)
+      // refresh subjects from backend (helps with ids)
       try {
         const latest = await plannerApi.getSubjects();
         if (Array.isArray(latest)) setSubjects(latest);
@@ -128,10 +125,17 @@ export default function App() {
     }
   }
 
-  // ✅ One-click practical start: Start Day => auto generate schedule
+  // ✅ Start Day: snapshot + clear logs + generate schedule
   async function startDay() {
     setApiError("");
     setDayStarted(true);
+    setMissedLog([]);
+    setMissed([]);
+
+    const snap = {};
+    for (const s of subjects) snap[String(s.id)] = Number(s.completedTopics || 0);
+    setDaySnapshot(snap);
+
     setTab("Schedule");
     await generateSchedule();
   }
@@ -141,21 +145,33 @@ export default function App() {
     setDayStarted(false);
     setSchedule([]);
     setMissed([]);
+    setMissedLog([]);
+    setDaySnapshot({});
     setTab("Planner");
+  }
+
+  // ✅ Called by Schedule when end-of-day
+  function onDayFinished(report) {
+    // save report (latest first)
+    setReports((prev) => [report, ...(prev || [])]);
+
+    // clear day schedule & logs and show dashboard
+    setSchedule([]);
+    setMissed([]);
+    setMissedLog([]);
+    setDaySnapshot({});
+    setDayStarted(false);
+
+    setTab("Dashboard");
   }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
       <div className="mx-auto max-w-6xl px-4 py-6 md:px-6">
-        {/* Header */}
         <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div>
-            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight text-slate-900">
-              Smart Study Planner
-            </h1>
-            <p className="mt-1 text-sm text-slate-500">
-              Practical planner (Start Day → plan → current session).
-            </p>
+            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight text-slate-900">Smart Study Planner</h1>
+            <p className="mt-1 text-sm text-slate-500">Start Day → plan → sessions → auto report.</p>
           </div>
 
           <div className="flex items-center gap-3">
@@ -186,7 +202,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Error */}
         {apiError ? (
           <div className="mt-5 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             <div className="font-semibold">Error</div>
@@ -194,9 +209,7 @@ export default function App() {
           </div>
         ) : null}
 
-        {/* Layout */}
         <div className="mt-6 grid gap-5 md:grid-cols-[260px_1fr]">
-          {/* Sidebar */}
           <aside className="rounded-3xl border bg-white p-4 shadow-sm">
             <div className="text-xs font-semibold text-slate-500">MENU</div>
 
@@ -205,15 +218,12 @@ export default function App() {
                 <button
                   key={t.key}
                   onClick={() => {
-                    // ✅ prevent opening Schedule before Start Day
                     if (t.key === "Schedule" && !dayStarted) return setTab("Planner");
                     setTab(t.key);
                   }}
                   className={[
                     "w-full rounded-2xl px-4 py-3 text-left text-sm font-semibold transition",
-                    tab === t.key
-                      ? "bg-slate-900 text-white shadow-sm"
-                      : "text-slate-700 hover:bg-slate-50",
+                    tab === t.key ? "bg-slate-900 text-white shadow-sm" : "text-slate-700 hover:bg-slate-50",
                   ].join(" ")}
                 >
                   {t.label}
@@ -227,13 +237,18 @@ export default function App() {
                 <MiniStat label="Day" value={dayStarted ? "Started" : "Not"} />
                 <MiniStat label="Subjects" value={subjects.length} />
                 <MiniStat label="Missed" value={missed.length} />
-                <MiniStat label="Study min" value={stats.studyMin} />
+                <MiniStat label="Skips" value={missedLog.length} />
               </div>
             </div>
           </aside>
 
-          {/* Main */}
           <section className="space-y-5">
+            {tab === "Dashboard" && (
+              <Panel title="Dashboard" subtitle="Saved reports + overall progress.">
+                <Dashboard reports={reports} subjects={subjects} />
+              </Panel>
+            )}
+
             {tab === "Subjects" && (
               <Panel title="Subjects" subtitle="Add and manage subjects, topics, and durations.">
                 <Subjects subjects={subjects} setSubjects={setSubjects} />
@@ -247,7 +262,7 @@ export default function App() {
             )}
 
             {tab === "Schedule" && dayStarted && (
-              <Panel title="Daily Planner" subtitle="Current session view + skip/complete + auto re-plan.">
+              <Panel title="Daily Planner" subtitle="Current session + skip/complete + break auto-timer + end report.">
                 <Schedule
                   settings={settings}
                   schedule={schedule}
@@ -257,13 +272,18 @@ export default function App() {
                   subjects={subjects}
                   setSubjects={setSubjects}
                   dayStarted={dayStarted}
+                  missedLog={missedLog}
+                  setMissedLog={setMissedLog}
+                  daySnapshot={daySnapshot}
+                  setDaySnapshot={setDaySnapshot}
+                  onDayFinished={onDayFinished}
                 />
               </Panel>
             )}
 
             {tab === "Report" && (
-              <Panel title="Daily Report" subtitle="Summary of progress + missed sessions.">
-                <Report schedule={schedule} subjects={subjects} missed={missed} />
+              <Panel title="Daily Report" subtitle="Current day live report (before day ends).">
+                <Report schedule={schedule} subjects={subjects} missedLog={missedLog} />
               </Panel>
             )}
           </section>
