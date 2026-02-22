@@ -140,107 +140,19 @@ export default function Schedule({
 }) {
   const [busy, setBusy] = useState(false);
 
-  // ✅ message when expired target dates are skipped
-  const [dateNotice, setDateNotice] = useState("");
-
-  // from global timer store
   const [running, setRunning] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(0);
 
+  // ✅ message when expired subjects are replaced
+  const [expiredMsg, setExpiredMsg] = useState("");
+
   const timeUpHandledRef = useRef(false);
   const actionLockRef = useRef(false);
+  const applyingRef = useRef(false);
 
   const current = schedule?.[currentIndex] || null;
   const next = schedule?.[currentIndex + 1] || null;
 
-  // ----------------------------
-  // Target date / deadline helpers
-  // ----------------------------
-  function getStartOfToday() {
-    const d = new Date();
-    d.setHours(0, 0, 0, 0);
-    return d;
-  }
-
-  function parseAnyDate(dateLike) {
-    if (!dateLike) return null;
-
-    // If already Date
-    if (dateLike instanceof Date && !isNaN(dateLike.getTime())) return dateLike;
-
-    // Numeric timestamp
-    if (typeof dateLike === "number" && Number.isFinite(dateLike)) {
-      const d = new Date(dateLike);
-      return isNaN(d.getTime()) ? null : d;
-    }
-
-    // String date (supports YYYY-MM-DD / ISO / others)
-    if (typeof dateLike === "string") {
-      const trimmed = dateLike.trim();
-      if (!trimmed) return null;
-
-      // Common "YYYY-MM-DD" fix: treat as local date start
-      const ymd = /^\d{4}-\d{2}-\d{2}$/;
-      if (ymd.test(trimmed)) {
-        const [y, m, day] = trimmed.split("-").map((x) => Number(x));
-        const d = new Date(y, m - 1, day);
-        return isNaN(d.getTime()) ? null : d;
-      }
-
-      const d = new Date(trimmed);
-      return isNaN(d.getTime()) ? null : d;
-    }
-
-    return null;
-  }
-
-  // Tries multiple field names so it works even if your DB uses different column name
-  function getSubjectTargetDate(subject) {
-    if (!subject) return null;
-    return (
-      subject.targetDate ??
-      subject.deadline ??
-      subject.dueDate ??
-      subject.endDate ??
-      subject.target_date ??
-      subject.deadline_date ??
-      subject.due_date ??
-      null
-    );
-  }
-
-  function isTargetDatePassed(subject) {
-    const raw = getSubjectTargetDate(subject);
-    const d = parseAnyDate(raw);
-    if (!d) return false; // if no date, don't block scheduling
-    const today0 = getStartOfToday();
-    const cmp = new Date(d);
-    cmp.setHours(0, 0, 0, 0);
-    return cmp.getTime() < today0.getTime(); // strictly before today
-  }
-
-  function filterOutExpiredSessions(list, subjectList) {
-    const subs = Array.isArray(subjectList) ? subjectList : [];
-    const data = Array.isArray(list) ? list : [];
-
-    const skippedNames = [];
-    const filtered = data.filter((item) => {
-      if (!item || item.type !== "study") return true;
-
-      const subj = subs.find((s) => String(s.id) === String(item.subjectId));
-      if (!subj) return true;
-
-      if (isTargetDatePassed(subj)) {
-        skippedNames.push(subj.name || item.subjectName || `Subject ${subj.id}`);
-        return false;
-      }
-      return true;
-    });
-
-    return { filtered, skippedNames };
-  }
-
-  // Subscribe to timer updates
   useEffect(() => {
     return PlannerTimer.subscribe(({ running, secondsLeft }) => {
       setRunning(running);
@@ -251,60 +163,231 @@ export default function Schedule({
   useEffect(() => {
     timeUpHandledRef.current = false;
     actionLockRef.current = false;
+    setExpiredMsg("");
   }, [currentIndex]);
 
-  // keep index valid
   useEffect(() => {
     if ((schedule || []).length === 0) {
       setCurrentIndex(0);
       PlannerTimer.stop(true);
       return;
     }
-    if (currentIndex >= schedule.length) {
+    if (currentIndex >= (schedule || []).length) {
       setCurrentIndex(0);
       PlannerTimer.stop(true);
     }
   }, [schedule.length]);
 
-  // ✅ If schedule already contains expired target-date sessions (from backend or old state), remove them
-  useEffect(() => {
-    if (!Array.isArray(schedule) || schedule.length === 0) return;
-    if (!Array.isArray(subjects) || subjects.length === 0) return;
+  // ==========================
+  // ✅ Target date passed helpers
+  // ==========================
+  function startOfToday() {
+    const n = new Date();
+    return new Date(n.getFullYear(), n.getMonth(), n.getDate(), 0, 0, 0, 0);
+  }
 
-    const { filtered, skippedNames } = filterOutExpiredSessions(schedule, subjects);
+  function parseDateLoose(v) {
+    if (!v) return null;
+    if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
 
-    if (filtered.length !== schedule.length) {
-      stopTimer(true);
+    const s = String(v).trim();
+    if (!s) return null;
 
-      // adjust index safely
-      let newIdx = currentIndex;
-      if (newIdx >= filtered.length) newIdx = Math.max(0, filtered.length - 1);
-
-      setSchedule(filtered);
-      setCurrentIndex(newIdx);
-
-      if (skippedNames.length > 0) {
-        const unique = Array.from(new Set(skippedNames));
-        setDateNotice(
-          `⛔ Not scheduled (target date passed): ${unique.join(
-            ", "
-          )}. Please update the target date to plan them again.`
-        );
-      }
-    } else {
-      // keep existing notice (don’t wipe while user reads)
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) {
+      const y = Number(m[1]);
+      const mo = Number(m[2]) - 1;
+      const d = Number(m[3]);
+      const dt = new Date(y, mo, d, 0, 0, 0, 0);
+      return isNaN(dt.getTime()) ? null : dt;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subjects, schedule]);
 
-  // Auto start BREAK only
-  useEffect(() => {
-    if (!current) return;
-    if (current.type !== "break") return;
-    if (running) return;
+    const dt = new Date(s);
+    return isNaN(dt.getTime()) ? null : dt;
+  }
 
-    startTimerForCurrent();
-  }, [currentIndex, current?.type]);
+  function getSubjectById(subjectId, list = subjects) {
+    return (list || []).find((s) => String(s.id) === String(subjectId)) || null;
+  }
+
+  function guessTargetDateFromSubject(subj) {
+    if (!subj || typeof subj !== "object") return null;
+
+    const directKeys = [
+      "targetDate",
+      "target_date",
+      "targetdate",
+      "deadline",
+      "dead_line",
+      "dueDate",
+      "due_date",
+      "duedate",
+      "endDate",
+      "end_date",
+      "enddate",
+    ];
+
+    for (const k of directKeys) {
+      if (subj[k]) return subj[k];
+    }
+
+    const keys = Object.keys(subj);
+    const candidates = [];
+
+    for (const k of keys) {
+      const lk = k.toLowerCase();
+      const val = subj[k];
+
+      const looks =
+        lk.includes("target") || lk.includes("deadline") || lk.includes("due") || lk.includes("end");
+      const hasDateWord = lk.includes("date") || lk.includes("day");
+
+      if (looks || hasDateWord) {
+        const dt = parseDateLoose(val);
+        if (dt) candidates.push({ key: k, dt });
+      }
+    }
+
+    candidates.sort((a, b) => {
+      const score = (k) => {
+        const x = k.toLowerCase();
+        return (
+          (x.includes("target") ? 4 : 0) +
+          (x.includes("deadline") ? 3 : 0) +
+          (x.includes("due") ? 2 : 0) +
+          (x.includes("end") ? 1 : 0) +
+          (x.includes("date") ? 1 : 0)
+        );
+      };
+      return score(b.key) - score(a.key);
+    });
+
+    return candidates.length ? candidates[0].dt : null;
+  }
+
+  function isSubjectExpiredByObj(subj) {
+    if (!subj) return false;
+    const raw = guessTargetDateFromSubject(subj);
+    const dt = raw instanceof Date ? raw : parseDateLoose(raw);
+    if (!dt) return false;
+    return dt.getTime() < startOfToday().getTime();
+  }
+
+  function isSubjectExpired(subjectId, list = subjects) {
+    const subj = getSubjectById(subjectId, list);
+    if (!subj) return false;
+    return isSubjectExpiredByObj(subj);
+  }
+
+  function remainingTopics(subj) {
+    const total = Number(subj?.totalTopics || 0);
+    const done = Number(subj?.completedTopics || 0);
+    return Math.max(0, total - done);
+  }
+
+  // ==========================
+  // ✅ MAIN FIX:
+  // Replace expired subject sessions WITHOUT removing time slots
+  // ==========================
+  function buildActivePool(list) {
+    const arr = Array.isArray(list) ? list : [];
+
+    const active = arr
+      .filter((s) => s && !isSubjectExpiredByObj(s))
+      .filter((s) => remainingTopics(s) > 0);
+
+    // order: earliest target date first (if exists), else by more remaining topics
+    active.sort((a, b) => {
+      const da = guessTargetDateFromSubject(a);
+      const db = guessTargetDateFromSubject(b);
+      const dta = da instanceof Date ? da : parseDateLoose(da);
+      const dtb = db instanceof Date ? db : parseDateLoose(db);
+
+      const aHas = !!dta;
+      const bHas = !!dtb;
+
+      if (aHas && bHas) return dta.getTime() - dtb.getTime();
+      if (aHas && !bHas) return -1;
+      if (!aHas && bHas) return 1;
+
+      return remainingTopics(b) - remainingTopics(a);
+    });
+
+    return active;
+  }
+
+  function replaceExpiredSessions(plainSchedule, list) {
+    const sch = Array.isArray(plainSchedule) ? plainSchedule : [];
+    if (!sch.length) return { nextSchedule: sch, changed: false, removedNames: [] };
+
+    const activePool = buildActivePool(list);
+
+    // If no active subjects, we cannot replace study sessions
+    if (activePool.length === 0) {
+      // just blank out expired study sessions subjectName/Id so user cannot go to it
+      let changed = false;
+      const removedNames = [];
+
+      const nextSchedule = sch.map((item) => {
+        if (!item) return item;
+        if (item.type !== "study") return item;
+
+        const subj = getSubjectById(item.subjectId, list);
+        const expired = item.subjectId ? isSubjectExpired(item.subjectId, list) : false;
+
+        if (expired) {
+          if (subj?.name) removedNames.push(subj.name);
+          changed = true;
+          return { ...item, subjectId: null, subjectName: "—" };
+        }
+        return item;
+      });
+
+      return { nextSchedule, changed, removedNames };
+    }
+
+    let cursor = 0;
+    let changed = false;
+    const removedNames = [];
+
+    const nextSchedule = sch.map((item) => {
+      if (!item) return item;
+      if (item.type !== "study") return item;
+
+      const expired = item.subjectId ? isSubjectExpired(item.subjectId, list) : false;
+
+      if (!expired) return item;
+
+      const oldSubj = getSubjectById(item.subjectId, list);
+      if (oldSubj?.name) removedNames.push(oldSubj.name);
+
+      // pick next active subject (round-robin)
+      const pick = activePool[cursor % activePool.length];
+      cursor += 1;
+
+      changed = true;
+      return {
+        ...item,
+        subjectId: pick.id,
+        subjectName: pick.name,
+      };
+    });
+
+    return { nextSchedule, changed, removedNames };
+  }
+
+  function uniq(arr) {
+    const out = [];
+    const seen = new Set();
+    for (const x of arr || []) {
+      const k = String(x || "");
+      if (!k) continue;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(x);
+    }
+    return out;
+  }
 
   async function refreshSubjects() {
     try {
@@ -325,6 +408,44 @@ export default function Schedule({
       return [];
     }
   }
+
+  // ✅ Apply replacement when subjects are available (so expired never appears)
+  useEffect(() => {
+    if (applyingRef.current) return;
+    if (!Array.isArray(subjects) || subjects.length === 0) return;
+    if (!Array.isArray(schedule) || schedule.length === 0) return;
+
+    applyingRef.current = true;
+
+    const { nextSchedule, changed, removedNames } = replaceExpiredSessions(schedule, subjects);
+
+    if (changed) {
+      stopTimer(true);
+      setSchedule(nextSchedule);
+
+      const uniqueRemoved = uniq(removedNames);
+      setExpiredMsg(
+        uniqueRemoved.length
+          ? `⚠️ Target date passed: ${uniqueRemoved.join(", ")}. Removed from schedule and replaced with other subjects.`
+          : `⚠️ Some subjects target date passed. Removed from schedule and replaced with other subjects.`
+      );
+
+      // keep currentIndex safe
+      const safeIdx = Math.min(currentIndex, Math.max(0, nextSchedule.length - 1));
+      setCurrentIndex(safeIdx);
+    }
+
+    setTimeout(() => {
+      applyingRef.current = false;
+    }, 0);
+  }, [subjects, schedule?.length]);
+
+  // Ensure subjects are loaded when day starts
+  useEffect(() => {
+    if (!dayStarted) return;
+    if (Array.isArray(subjects) && subjects.length > 0) return;
+    refreshSubjects();
+  }, [dayStarted]);
 
   function format(sec) {
     const m = Math.floor(sec / 60);
@@ -356,9 +477,24 @@ export default function Schedule({
     });
   }
 
+  // Auto start BREAK only
+  useEffect(() => {
+    if (!current) return;
+    if (current.type !== "break") return;
+    if (running) return;
+
+    startTimerForCurrent();
+  }, [currentIndex, current?.type]);
+
   function toggleTimer() {
     if (!current) return;
     if (current.type === "break") return;
+
+    // if somehow a blank study slipped (no subjectId), block
+    if (current.type === "study" && !current.subjectId) {
+      setExpiredMsg(`⚠️ This study session cannot run because its subject target date has passed and no replacement is available.`);
+      return;
+    }
 
     if (running) {
       PlannerTimer.pause();
@@ -393,36 +529,29 @@ export default function Schedule({
   async function regenerateScheduleKeepIndex(desiredIndex = null) {
     if (!dayStarted) return;
 
-    const keepIdx =
-      typeof desiredIndex === "number" ? desiredIndex : currentIndex;
+    const keepIdx = typeof desiredIndex === "number" ? desiredIndex : currentIndex;
 
     setBusy(true);
     try {
+      const latestSubjects = await refreshSubjects();
       const data = await plannerApi.generateSchedule(normalizeSettings(settings));
 
       if (Array.isArray(data) && data.length > 0) {
-        // ✅ filter out sessions whose subject target date has passed
-        const { filtered, skippedNames } = filterOutExpiredSessions(data, subjects);
+        const { nextSchedule, changed, removedNames } = replaceExpiredSessions(data, latestSubjects);
 
-        if (skippedNames.length > 0) {
-          const unique = Array.from(new Set(skippedNames));
-          const msg = `⛔ Not scheduled (target date passed): ${unique.join(
-            ", "
-          )}. Please update the target date to plan them again.`;
-          setDateNotice(msg);
+        setSchedule(nextSchedule);
+        const safeIdx = Math.min(keepIdx, Math.max(0, nextSchedule.length - 1));
+        setCurrentIndex(safeIdx);
 
-          // also show a popup message (so user can't miss it)
-          window.alert(msg);
-        }
-
-        const safeData = filtered;
-        if (safeData.length === 0) {
-          setSchedule([]);
-          setCurrentIndex(0);
+        if (changed) {
+          const uniqueRemoved = uniq(removedNames);
+          setExpiredMsg(
+            uniqueRemoved.length
+              ? `⚠️ Target date passed: ${uniqueRemoved.join(", ")}. Removed from schedule and replaced with other subjects.`
+              : `⚠️ Some subjects target date passed. Removed from schedule and replaced with other subjects.`
+          );
         } else {
-          const safeIdx = Math.min(keepIdx, safeData.length - 1);
-          setSchedule(safeData);
-          setCurrentIndex(safeIdx);
+          setExpiredMsg("");
         }
       } else {
         setSchedule([]);
@@ -462,6 +591,10 @@ export default function Schedule({
 
   async function completeCurrentStudy(moveNextAfter = true) {
     if (!current || current.type !== "study") return;
+    if (!current.subjectId) {
+      setExpiredMsg(`⚠️ This study session cannot be completed because its subject is not available.`);
+      return;
+    }
     if (actionLockRef.current) return;
     actionLockRef.current = true;
 
@@ -517,6 +650,10 @@ export default function Schedule({
 
   async function skipSession() {
     if (!current || current.type !== "study") return;
+    if (!current.subjectId) {
+      setExpiredMsg(`⚠️ This study session cannot be skipped because its subject is not available.`);
+      return;
+    }
     if (actionLockRef.current) return;
     actionLockRef.current = true;
 
@@ -524,9 +661,7 @@ export default function Schedule({
 
     setMissedLog((prev) => {
       const key = `${current.subjectId}__${current.startTime}__${currentIndex}`;
-      const already = prev.some(
-        (x) => `${x.subjectId}__${x.startTime}__${x.index}` === key
-      );
+      const already = prev.some((x) => `${x.subjectId}__${x.startTime}__${x.index}` === key);
       if (already) return prev;
 
       return [
@@ -593,10 +728,7 @@ export default function Schedule({
       }))
       .filter((r) => r.completedToday > 0 || r.missedCount > 0);
 
-    const completedTopicsToday = mergedRows.reduce(
-      (a, r) => a + r.completedToday,
-      0
-    );
+    const completedTopicsToday = mergedRows.reduce((a, r) => a + r.completedToday, 0);
     const missedCount = (missedLog || []).length;
 
     const now = new Date();
@@ -630,9 +762,7 @@ export default function Schedule({
       <div className="rounded-3xl border bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
-            <div className="text-xs font-semibold text-slate-500">
-              CURRENT SESSION
-            </div>
+            <div className="text-xs font-semibold text-slate-500">CURRENT SESSION</div>
 
             {!current ? (
               <div className="mt-2 text-slate-700">No schedule available.</div>
@@ -643,18 +773,14 @@ export default function Schedule({
                 </div>
 
                 <div className="mt-1 text-sm text-slate-600">
-                  Start: {current.startTime} • Duration: {current.durationMinutes}{" "}
-                  min
+                  Start: {current.startTime} • Duration: {current.durationMinutes} min
                 </div>
 
-                <div className="mt-3 text-sm font-semibold text-slate-900">
-                  {statusText}
-                </div>
+                <div className="mt-3 text-sm font-semibold text-slate-900">{statusText}</div>
 
-                {/* ✅ message (only when needed) */}
-                {dateNotice ? (
-                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                    {dateNotice}
+                {expiredMsg ? (
+                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+                    {expiredMsg}
                   </div>
                 ) : null}
 
@@ -688,7 +814,7 @@ export default function Schedule({
 
             <button
               onClick={() => completeCurrentStudy(true)}
-              disabled={!current || current?.type !== "study"}
+              disabled={!current || current?.type !== "study" || !current?.subjectId}
               className="rounded-2xl bg-green-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-green-700 disabled:opacity-50"
             >
               Complete
@@ -696,7 +822,7 @@ export default function Schedule({
 
             <button
               onClick={skipSession}
-              disabled={!current || current?.type !== "study"}
+              disabled={!current || current?.type !== "study" || !current?.subjectId}
               className="rounded-2xl border px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
             >
               Skip
@@ -707,14 +833,10 @@ export default function Schedule({
         <div className="mt-4 flex items-center justify-between text-sm">
           <div className="text-slate-600">
             Missed :{" "}
-            <span className="font-semibold text-slate-900">
-              {missed?.length || 0}
-            </span>
+            <span className="font-semibold text-slate-900">{missed?.length || 0}</span>
             <span className="mx-2">•</span>
             Skips today :{" "}
-            <span className="font-semibold text-slate-900">
-              {missedLog?.length || 0}
-            </span>
+            <span className="font-semibold text-slate-900">{missedLog?.length || 0}</span>
           </div>
 
           <button
@@ -730,9 +852,7 @@ export default function Schedule({
       <div className="rounded-3xl border bg-white p-6 shadow-sm">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-base font-semibold text-slate-900">
-              Today Plan
-            </div>
+            <div className="text-base font-semibold text-slate-900">Today Plan</div>
             <div className="mt-1 text-sm text-slate-500">
               Click a row to jump to that session.
             </div>
@@ -757,12 +877,10 @@ export default function Schedule({
               {(schedule || []).map((s, idx) => (
                 <tr
                   key={idx}
-                  className={[
-                    "border-t",
-                    idx === currentIndex ? "bg-slate-50" : "",
-                  ].join(" ")}
+                  className={["border-t", idx === currentIndex ? "bg-slate-50" : ""].join(" ")}
                   onClick={() => {
                     stopTimer(true);
+                    setExpiredMsg("");
                     setCurrentIndex(idx);
                   }}
                   style={{ cursor: "pointer" }}
@@ -770,11 +888,9 @@ export default function Schedule({
                   <td className="py-3 text-slate-700">{idx + 1}</td>
                   <td className="py-3 font-semibold text-slate-900">{s.type}</td>
                   <td className="py-3 text-slate-700">{s.startTime}</td>
+                  <td className="py-3 text-slate-700">{s.durationMinutes} min</td>
                   <td className="py-3 text-slate-700">
-                    {s.durationMinutes} min
-                  </td>
-                  <td className="py-3 text-slate-700">
-                    {s.type === "study" ? s.subjectName : "-"}
+                    {s.type === "study" ? (s.subjectName || "—") : "-"}
                   </td>
                 </tr>
               ))}
