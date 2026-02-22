@@ -36,6 +36,9 @@ export default function Schedule({
   const intervalRef = useRef(null);
   const timeUpHandledRef = useRef(false);
 
+  // ✅ anti-double-click guard for Skip/Complete
+  const actionLockRef = useRef(false);
+
   const current = schedule?.[currentIndex] || null;
   const next = schedule?.[currentIndex + 1] || null;
 
@@ -43,8 +46,10 @@ export default function Schedule({
     return () => intervalRef.current && clearInterval(intervalRef.current);
   }, []);
 
+  // reset time up guard & lock when session changes
   useEffect(() => {
     timeUpHandledRef.current = false;
+    actionLockRef.current = false;
     stopTimer(true);
     
   }, [currentIndex]);
@@ -73,18 +78,33 @@ export default function Schedule({
     
   }, [schedule.length]);
 
+  // ✅ Auto start BREAK only
+  useEffect(() => {
+    if (!current) return;
+    if (current.type !== "break") return;
+    if (running) return;
+    startTimerForCurrent(); // break auto
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIndex, current?.type]);
+
   async function refreshSubjects() {
     try {
       const data = await plannerApi.getSubjects();
       setSubjects(Array.isArray(data) ? data : []);
-    } catch {}
+      return Array.isArray(data) ? data : [];
+    } catch {
+      return [];
+    }
   }
 
   async function refreshMissed() {
     try {
       const data = await plannerApi.getMissed();
       setMissed(Array.isArray(data) ? data : []);
-    } catch {}
+      return Array.isArray(data) ? data : [];
+    } catch {
+      return [];
+    }
   }
 
   function format(sec) {
@@ -105,7 +125,9 @@ export default function Schedule({
 
     timeUpHandledRef.current = false;
 
-    const startSeconds = secondsLeft > 0 ? secondsLeft : Number(current.durationMinutes || 0) * 60;
+    const startSeconds =
+      secondsLeft > 0 ? secondsLeft : Number(current.durationMinutes || 0) * 60;
+
     setSecondsLeft(startSeconds);
     setRunning(true);
 
@@ -132,15 +154,12 @@ export default function Schedule({
 
   function toggleTimer() {
     if (!current) return;
-
-    // break should not need manual start
-    if (current.type === "break") return;
+    if (current.type === "break") return; // break auto only
 
     if (running) {
       stopTimer(false);
       return;
     }
-
     startTimerForCurrent();
   }
 
@@ -150,24 +169,26 @@ export default function Schedule({
     if (!schedule?.length) return;
 
     const isLast = currentIndex >= schedule.length - 1;
-
     if (isLast) {
       
       finishDayNow();
       return;
     }
-
     setCurrentIndex((i) => i + 1);
   }
 
   async function regenerateScheduleKeepIndex(desiredIndex = null) {
     if (!dayStarted) return;
 
-    const keepIdx = typeof desiredIndex === "number" ? desiredIndex : currentIndex;
+    const keepIdx =
+      typeof desiredIndex === "number" ? desiredIndex : currentIndex;
 
     setBusy(true);
     try {
-      const data = await plannerApi.generateSchedule(normalizeSettings(settings));
+      const data = await plannerApi.generateSchedule(
+        normalizeSettings(settings)
+      );
+
       if (Array.isArray(data) && data.length > 0) {
         const safeIdx = Math.min(keepIdx, data.length - 1);
         setSchedule(data);
@@ -184,11 +205,20 @@ export default function Schedule({
   }
 
   
+  // ✅ MUST show confirm when 100% complete
   async function confirmDeleteIfComplete(subjectId) {
-    const subj = subjects.find((s) => String(s.id) === String(subjectId));
+    // refresh latest subjects to avoid stale object
+    const latestSubjects = await refreshSubjects();
+    const subj = latestSubjects.find(
+      (s) => String(s.id) === String(subjectId)
+    );
     if (!subj) return;
 
-    const remaining = Math.max(0, Number(subj.totalTopics || 0) - Number(subj.completedTopics || 0));
+    const remaining = Math.max(
+      0,
+      Number(subj.totalTopics || 0) - Number(subj.completedTopics || 0)
+    );
+
     if (remaining > 0) return;
 
     const yes = window.confirm(
@@ -200,22 +230,31 @@ export default function Schedule({
     try {
       await plannerApi.deleteSubject(subj.id);
     } catch {}
+
     await refreshSubjects();
   }
 
-  async function completeCurrentStudy(moveNextAfter = false) {
+  // ✅ Complete study session
+  // moveNextAfter = true => go to next slot immediately
+  async function completeCurrentStudy(moveNextAfter = true) {
     if (!current || current.type !== "study") return;
+    if (actionLockRef.current) return;
+    actionLockRef.current = true;
 
     stopTimer(true);
 
     const input = window.prompt(
-      `⏰ Session ended.\nHow many topics did you complete for "${current.subjectName}"?`,
+      `✅ Complete session: "${current.subjectName}"\nHow many topics did you complete?`,
       "1"
     );
 
     const done = Math.max(0, Number(input || 0));
 
-    const subj = subjects.find((s) => String(s.id) === String(current.subjectId));
+    // find subject
+    const subj = subjects.find(
+      (s) => String(s.id) === String(current.subjectId)
+    );
+
     if (subj) {
       const updated = {
         ...subj,
@@ -228,17 +267,22 @@ export default function Schedule({
       try {
         await plannerApi.updateSubject(subj.id, updated);
       } catch {}
-      await refreshSubjects();
 
-      // ✅ If now complete, ask delete
+      // ✅ show confirm if completed
       await confirmDeleteIfComplete(subj.id);
     }
 
-    let keepIdx = currentIndex;
-
+    // move next first (as you requested)
     if (moveNextAfter) {
-      keepIdx = schedule?.length ? Math.min(currentIndex + 1, schedule.length - 1) : currentIndex;
-      setCurrentIndex(keepIdx);
+      const nextIdx = Math.min(
+        currentIndex + 1,
+        Math.max(0, (schedule?.length || 1) - 1)
+      );
+      setCurrentIndex(nextIdx);
+
+      await regenerateScheduleKeepIndex(nextIdx);
+      actionLockRef.current = false;
+      return;
     }
 
     await regenerateScheduleKeepIndex(keepIdx);
@@ -247,8 +291,12 @@ export default function Schedule({
     if (keepIdx >= (schedule?.length || 1) - 1) {
       
     }
+    // else rebuild in same index
+    await regenerateScheduleKeepIndex(currentIndex);
+    actionLockRef.current = false;
   }
 
+  // ✅ Skip current study session
   async function skipSession() {
     if (!current || current.type !== "study") return;
 
@@ -263,20 +311,57 @@ export default function Schedule({
         index: currentIndex,
       },
     ]);
+    if (actionLockRef.current) return;
+    actionLockRef.current = true;
 
     stopTimer(true);
 
+    // ✅ Add to missedLog ONLY ONCE (no duplicates for same index & startTime)
+    setMissedLog((prev) => {
+      const key = `${current.subjectId}__${current.startTime}__${currentIndex}`;
+      const already = prev.some(
+        (x) => `${x.subjectId}__${x.startTime}__${x.index}` === key
+      );
+      if (already) return prev;
+
+      return [
+        ...prev,
+        {
+          at: new Date().toISOString(),
+          subjectId: current.subjectId,
+          subjectName: current.subjectName,
+          startTime: current.startTime,
+          index: currentIndex,
+        },
+      ];
+    });
+
+    // backend unique set (ok)
     try {
       await plannerApi.markMissed(current.subjectId); 
+      await plannerApi.markMissed(current.subjectId);
     } catch {}
+
     await refreshMissed();
 
     
     moveToNextOrEnd();
+    // go next slot immediately
+    const nextIdx = Math.min(
+      currentIndex + 1,
+      Math.max(0, (schedule?.length || 1) - 1)
+    );
+    const isLast = currentIndex >= (schedule?.length || 1) - 1;
 
-    // rebuild but keep currentIndex (after move)
-    const nextIdx = Math.min(currentIndex + 1, (schedule?.length || 1) - 1);
+    if (isLast) {
+      await finishDayNow();
+      actionLockRef.current = false;
+      return;
+    }
+
+    setCurrentIndex(nextIdx);
     await regenerateScheduleKeepIndex(nextIdx);
+    actionLockRef.current = false;
   }
 
   async function finishDayNow() {
@@ -284,7 +369,9 @@ export default function Schedule({
 
     // compute completed topics TODAY using snapshot
     const snap = daySnapshot || {};
-    const subjectRows = subjects.map((s) => {
+
+    // completed today
+    const subjectRowsBase = subjects.map((s) => {
       const before = Number(snap[String(s.id)] || 0);
       const after = Number(s.completedTopics || 0);
       const completedToday = Math.max(0, after - before);
@@ -295,25 +382,33 @@ export default function Schedule({
       };
     });
 
-    // missed counts per subject from missedLog
+    // missed per subject
     const missCountMap = new Map();
-    for (const m of missedLog) {
+    for (const m of missedLog || []) {
       const key = String(m.subjectId);
       missCountMap.set(key, (missCountMap.get(key) || 0) + 1);
     }
 
-    const mergedRows = subjectRows
+    const mergedRows = subjectRowsBase
       .map((r) => ({
         ...r,
         missedCount: missCountMap.get(String(r.subjectId)) || 0,
       }))
       .filter((r) => r.completedToday > 0 || r.missedCount > 0);
 
-    const completedTopicsToday = mergedRows.reduce((a, r) => a + r.completedToday, 0);
-    const missedCount = missedLog.length;
+    const completedTopicsToday = mergedRows.reduce(
+      (a, r) => a + r.completedToday,
+      0
+    );
+
+    const missedCount = (missedLog || []).length;
 
     const now = new Date();
-    const dateLabel = now.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" });
+    const dateLabel = now.toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+    });
 
     const report = {
       dateISO: now.toISOString(),
@@ -329,7 +424,8 @@ export default function Schedule({
 
   const statusText = (() => {
     if (!current) return "No plan yet.";
-    if (!running && secondsLeft === 0) return current.type === "break" ? "Break: auto" : "Timer: stopped";
+    if (!running && secondsLeft === 0)
+      return current.type === "break" ? "Break: auto timer" : "Timer: stopped";
     if (running) return `Time left: ${format(secondsLeft)}`;
     return `Paused: ${format(secondsLeft)}`;
   })();
@@ -339,7 +435,9 @@ export default function Schedule({
       <div className="rounded-3xl border bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
-            <div className="text-xs font-semibold text-slate-500">CURRENT SESSION</div>
+            <div className="text-xs font-semibold text-slate-500">
+              CURRENT SESSION
+            </div>
 
             {!current ? (
               <div className="mt-2 text-slate-700">No schedule available.</div>
@@ -350,19 +448,28 @@ export default function Schedule({
                 </div>
 
                 <div className="mt-1 text-sm text-slate-600">
-                  Start: {current.startTime} • Duration: {current.durationMinutes} min
+                  Start: {current.startTime} • Duration:{" "}
+                  {current.durationMinutes} min
                 </div>
 
-                <div className="mt-3 text-sm font-semibold text-slate-900">{statusText}</div>
+                <div className="mt-3 text-sm font-semibold text-slate-900">
+                  {statusText}
+                </div>
 
                 <div className="mt-4 rounded-2xl bg-slate-50 p-4">
-                  <div className="text-xs font-semibold text-slate-500">NEXT</div>
+                  <div className="text-xs font-semibold text-slate-500">
+                    NEXT
+                  </div>
                   {next ? (
                     <div className="mt-1 text-sm text-slate-700">
-                      {next.type === "study" ? `${next.subjectName} • ${next.durationMinutes} min` : `Break • ${next.durationMinutes} min`}
+                      {next.type === "study"
+                        ? `${next.subjectName} • ${next.durationMinutes} min`
+                        : `Break • ${next.durationMinutes} min`}
                     </div>
                   ) : (
-                    <div className="mt-1 text-sm text-slate-600">No next session (end of plan).</div>
+                    <div className="mt-1 text-sm text-slate-600">
+                      No next session (end of plan).
+                    </div>
                   )}
                 </div>
               </>
@@ -380,7 +487,7 @@ export default function Schedule({
             </button>
 
             <button
-              onClick={() => completeCurrentStudy(false)}
+              onClick={() => completeCurrentStudy(true)}
               disabled={!current || current?.type !== "study"}
               className="rounded-2xl bg-green-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-green-700 disabled:opacity-50"
             >
@@ -399,9 +506,15 @@ export default function Schedule({
 
         <div className="mt-4 flex items-center justify-between text-sm">
           <div className="text-slate-600">
-            Missed (backend unique): <span className="font-semibold text-slate-900">{missed?.length || 0}</span>
+            Missed (backend unique):{" "}
+            <span className="font-semibold text-slate-900">
+              {missed?.length || 0}
+            </span>
             <span className="mx-2">•</span>
-            Skips today (every click): <span className="font-semibold text-slate-900">{missedLog?.length || 0}</span>
+            Skips today (every click):{" "}
+            <span className="font-semibold text-slate-900">
+              {missedLog?.length || 0}
+            </span>
           </div>
 
           <button
@@ -417,10 +530,16 @@ export default function Schedule({
       <div className="rounded-3xl border bg-white p-6 shadow-sm">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-base font-semibold text-slate-900">Today Plan</div>
-            <div className="mt-1 text-sm text-slate-500">Click a row to jump to that session.</div>
+            <div className="text-base font-semibold text-slate-900">
+              Today Plan
+            </div>
+            <div className="mt-1 text-sm text-slate-500">
+              Click a row to jump to that session.
+            </div>
           </div>
-          <div className="text-sm font-semibold text-slate-900">{(schedule || []).length} items</div>
+          <div className="text-sm font-semibold text-slate-900">
+            {(schedule || []).length} items
+          </div>
         </div>
 
         <div className="mt-5 overflow-x-auto">
@@ -438,7 +557,10 @@ export default function Schedule({
               {(schedule || []).map((s, idx) => (
                 <tr
                   key={idx}
-                  className={["border-t", idx === currentIndex ? "bg-slate-50" : ""].join(" ")}
+                  className={[
+                    "border-t",
+                    idx === currentIndex ? "bg-slate-50" : "",
+                  ].join(" ")}
                   onClick={() => {
                     stopTimer(true);
                     setCurrentIndex(idx);
@@ -448,8 +570,12 @@ export default function Schedule({
                   <td className="py-3 text-slate-700">{idx + 1}</td>
                   <td className="py-3 font-semibold text-slate-900">{s.type}</td>
                   <td className="py-3 text-slate-700">{s.startTime}</td>
-                  <td className="py-3 text-slate-700">{s.durationMinutes} min</td>
-                  <td className="py-3 text-slate-700">{s.type === "study" ? s.subjectName : "-"}</td>
+                  <td className="py-3 text-slate-700">
+                    {s.durationMinutes} min
+                  </td>
+                  <td className="py-3 text-slate-700">
+                    {s.type === "study" ? s.subjectName : "-"}
+                  </td>
                 </tr>
               ))}
 
