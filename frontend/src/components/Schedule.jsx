@@ -143,8 +143,10 @@ export default function Schedule({
   const [running, setRunning] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(0);
 
-  // ✅ message when expired subjects are replaced
-  const [expiredMsg, setExpiredMsg] = useState("");
+  // ✅ Banner message above CURRENT SESSION (dismissible by tick)
+  const [bannerMsg, setBannerMsg] = useState("");
+  const bannerKeyRef = useRef("");
+  const dismissedKeysRef = useRef(new Set()); // if user closes message, don't show same one again
 
   const timeUpHandledRef = useRef(false);
   const actionLockRef = useRef(false);
@@ -163,7 +165,7 @@ export default function Schedule({
   useEffect(() => {
     timeUpHandledRef.current = false;
     actionLockRef.current = false;
-    setExpiredMsg("");
+    // ✅ DO NOT clear banner on index change
   }, [currentIndex]);
 
   useEffect(() => {
@@ -179,7 +181,7 @@ export default function Schedule({
   }, [schedule.length]);
 
   // ==========================
-  // ✅ Target date passed helpers
+  // Target date passed helpers
   // ==========================
   function startOfToday() {
     const n = new Date();
@@ -285,10 +287,6 @@ export default function Schedule({
     return Math.max(0, total - done);
   }
 
-  // ==========================
-  // ✅ MAIN FIX:
-  // Replace expired subject sessions WITHOUT removing time slots
-  // ==========================
   function buildActivePool(list) {
     const arr = Array.isArray(list) ? list : [];
 
@@ -296,7 +294,6 @@ export default function Schedule({
       .filter((s) => s && !isSubjectExpiredByObj(s))
       .filter((s) => remainingTopics(s) > 0);
 
-    // order: earliest target date first (if exists), else by more remaining topics
     active.sort((a, b) => {
       const da = guessTargetDateFromSubject(a);
       const db = guessTargetDateFromSubject(b);
@@ -322,9 +319,7 @@ export default function Schedule({
 
     const activePool = buildActivePool(list);
 
-    // If no active subjects, we cannot replace study sessions
     if (activePool.length === 0) {
-      // just blank out expired study sessions subjectName/Id so user cannot go to it
       let changed = false;
       const removedNames = [];
 
@@ -361,7 +356,6 @@ export default function Schedule({
       const oldSubj = getSubjectById(item.subjectId, list);
       if (oldSubj?.name) removedNames.push(oldSubj.name);
 
-      // pick next active subject (round-robin)
       const pick = activePool[cursor % activePool.length];
       cursor += 1;
 
@@ -389,6 +383,22 @@ export default function Schedule({
     return out;
   }
 
+  function setBannerIfNeeded(removedNames) {
+    const names = uniq(removedNames).map((x) => String(x || "").trim()).filter(Boolean);
+    const key = names.slice().sort().join("|") || "__some__";
+
+    // if user already dismissed this exact message, don't show again
+    if (dismissedKeysRef.current.has(key)) return;
+
+    bannerKeyRef.current = key;
+
+    setBannerMsg(
+      names.length
+        ? `⚠️ Target date passed: ${names.join(", ")}. Removed from schedule and replaced with other subjects.`
+        : `⚠️ Some subjects target date passed. Removed from schedule and replaced with other subjects.`
+    );
+  }
+
   async function refreshSubjects() {
     try {
       const data = await plannerApi.getSubjects();
@@ -409,7 +419,8 @@ export default function Schedule({
     }
   }
 
-  // ✅ Apply replacement when subjects are available (so expired never appears)
+  // ✅ Apply replacement when subjects are available.
+  // ✅ Banner shows even if schedule changes because of SKIP (unless user dismissed same banner)
   useEffect(() => {
     if (applyingRef.current) return;
     if (!Array.isArray(subjects) || subjects.length === 0) return;
@@ -423,14 +434,8 @@ export default function Schedule({
       stopTimer(true);
       setSchedule(nextSchedule);
 
-      const uniqueRemoved = uniq(removedNames);
-      setExpiredMsg(
-        uniqueRemoved.length
-          ? `⚠️ Target date passed: ${uniqueRemoved.join(", ")}. Removed from schedule and replaced with other subjects.`
-          : `⚠️ Some subjects target date passed. Removed from schedule and replaced with other subjects.`
-      );
+      setBannerIfNeeded(removedNames);
 
-      // keep currentIndex safe
       const safeIdx = Math.min(currentIndex, Math.max(0, nextSchedule.length - 1));
       setCurrentIndex(safeIdx);
     }
@@ -440,7 +445,6 @@ export default function Schedule({
     }, 0);
   }, [subjects, schedule?.length]);
 
-  // Ensure subjects are loaded when day starts
   useEffect(() => {
     if (!dayStarted) return;
     if (Array.isArray(subjects) && subjects.length > 0) return;
@@ -477,7 +481,6 @@ export default function Schedule({
     });
   }
 
-  // Auto start BREAK only
   useEffect(() => {
     if (!current) return;
     if (current.type !== "break") return;
@@ -490,9 +493,10 @@ export default function Schedule({
     if (!current) return;
     if (current.type === "break") return;
 
-    // if somehow a blank study slipped (no subjectId), block
     if (current.type === "study" && !current.subjectId) {
-      setExpiredMsg(`⚠️ This study session cannot run because its subject target date has passed and no replacement is available.`);
+      alert(
+        "This study session cannot run because its subject target date has passed and no replacement is available."
+      );
       return;
     }
 
@@ -543,16 +547,7 @@ export default function Schedule({
         const safeIdx = Math.min(keepIdx, Math.max(0, nextSchedule.length - 1));
         setCurrentIndex(safeIdx);
 
-        if (changed) {
-          const uniqueRemoved = uniq(removedNames);
-          setExpiredMsg(
-            uniqueRemoved.length
-              ? `⚠️ Target date passed: ${uniqueRemoved.join(", ")}. Removed from schedule and replaced with other subjects.`
-              : `⚠️ Some subjects target date passed. Removed from schedule and replaced with other subjects.`
-          );
-        } else {
-          setExpiredMsg("");
-        }
+        if (changed) setBannerIfNeeded(removedNames);
       } else {
         setSchedule([]);
         setCurrentIndex(0);
@@ -592,7 +587,7 @@ export default function Schedule({
   async function completeCurrentStudy(moveNextAfter = true) {
     if (!current || current.type !== "study") return;
     if (!current.subjectId) {
-      setExpiredMsg(`⚠️ This study session cannot be completed because its subject is not available.`);
+      alert("This study session cannot be completed because its subject is not available.");
       return;
     }
     if (actionLockRef.current) return;
@@ -651,7 +646,7 @@ export default function Schedule({
   async function skipSession() {
     if (!current || current.type !== "study") return;
     if (!current.subjectId) {
-      setExpiredMsg(`⚠️ This study session cannot be skipped because its subject is not available.`);
+      alert("This study session cannot be skipped because its subject is not available.");
       return;
     }
     if (actionLockRef.current) return;
@@ -695,6 +690,7 @@ export default function Schedule({
     }
 
     setCurrentIndex(nextIdx);
+    // ✅ Banner can still show if replacements happen during regenerate
     await regenerateScheduleKeepIndex(nextIdx);
     actionLockRef.current = false;
   }
@@ -762,6 +758,25 @@ export default function Schedule({
       <div className="rounded-3xl border bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
+            {/* ✅ Banner ABOVE CURRENT SESSION + tick button to dismiss */}
+            {bannerMsg ? (
+              <div className="relative mb-3 w-full rounded-2xl border border-amber-200 bg-amber-50 p-3 text-left text-sm font-semibold text-amber-900">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const key = bannerKeyRef.current || "__some__";
+                    dismissedKeysRef.current.add(key);
+                    setBannerMsg("");
+                  }}
+                  className="absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-full border border-amber-200 bg-white text-xs font-bold text-amber-900 hover:bg-amber-100"
+                  title="Dismiss"
+                >
+                  ✓
+                </button>
+                {bannerMsg}
+              </div>
+            ) : null}
+
             <div className="text-xs font-semibold text-slate-500">CURRENT SESSION</div>
 
             {!current ? (
@@ -777,12 +792,6 @@ export default function Schedule({
                 </div>
 
                 <div className="mt-3 text-sm font-semibold text-slate-900">{statusText}</div>
-
-                {expiredMsg ? (
-                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
-                    {expiredMsg}
-                  </div>
-                ) : null}
 
                 <div className="mt-4 rounded-2xl bg-slate-50 p-4">
                   <div className="text-xs font-semibold text-slate-500">NEXT</div>
@@ -880,7 +889,6 @@ export default function Schedule({
                   className={["border-t", idx === currentIndex ? "bg-slate-50" : ""].join(" ")}
                   onClick={() => {
                     stopTimer(true);
-                    setExpiredMsg("");
                     setCurrentIndex(idx);
                   }}
                   style={{ cursor: "pointer" }}
