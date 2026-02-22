@@ -20,10 +20,12 @@ export default function Schedule({
   setSubjects,
   dayStarted,
 
+  
   missedLog,
   setMissedLog,
   daySnapshot,
-  onDayFinished,
+  setDaySnapshot,
+  onDayFinished, 
 }) {
   const [busy, setBusy] = useState(false);
 
@@ -49,10 +51,20 @@ export default function Schedule({
     timeUpHandledRef.current = false;
     actionLockRef.current = false;
     stopTimer(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    
   }, [currentIndex]);
 
-  // keep index valid
+  // Auto-start BREAK only 
+  useEffect(() => {
+    if (!current) return;
+    if (current.type !== "break") return;
+    if (running) return;
+
+    
+    startTimerForCurrent();
+    
+  }, [currentIndex, current?.type]);
+
   useEffect(() => {
     if ((schedule || []).length === 0) {
       setCurrentIndex(0);
@@ -63,7 +75,7 @@ export default function Schedule({
       setCurrentIndex(0);
       stopTimer(true);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    
   }, [schedule.length]);
 
   // ✅ Auto start BREAK only
@@ -158,6 +170,7 @@ export default function Schedule({
 
     const isLast = currentIndex >= schedule.length - 1;
     if (isLast) {
+      
       finishDayNow();
       return;
     }
@@ -191,6 +204,7 @@ export default function Schedule({
     }
   }
 
+  
   // ✅ MUST show confirm when 100% complete
   async function confirmDeleteIfComplete(subjectId) {
     // refresh latest subjects to avoid stale object
@@ -271,6 +285,12 @@ export default function Schedule({
       return;
     }
 
+    await regenerateScheduleKeepIndex(keepIdx);
+
+    
+    if (keepIdx >= (schedule?.length || 1) - 1) {
+      
+    }
     // else rebuild in same index
     await regenerateScheduleKeepIndex(currentIndex);
     actionLockRef.current = false;
@@ -279,6 +299,18 @@ export default function Schedule({
   // ✅ Skip current study session
   async function skipSession() {
     if (!current || current.type !== "study") return;
+
+    // add to local missedLog (counts every skip)
+    setMissedLog((prev) => [
+      ...prev,
+      {
+        at: new Date().toISOString(),
+        subjectId: current.subjectId,
+        subjectName: current.subjectName,
+        startTime: current.startTime,
+        index: currentIndex,
+      },
+    ]);
     if (actionLockRef.current) return;
     actionLockRef.current = true;
 
@@ -306,11 +338,14 @@ export default function Schedule({
 
     // backend unique set (ok)
     try {
+      await plannerApi.markMissed(current.subjectId); 
       await plannerApi.markMissed(current.subjectId);
     } catch {}
 
     await refreshMissed();
 
+    
+    moveToNextOrEnd();
     // go next slot immediately
     const nextIdx = Math.min(
       currentIndex + 1,
@@ -332,6 +367,7 @@ export default function Schedule({
   async function finishDayNow() {
     stopTimer(true);
 
+    // compute completed topics TODAY using snapshot
     const snap = daySnapshot || {};
 
     // completed today
@@ -382,6 +418,7 @@ export default function Schedule({
       subjectRows: mergedRows.sort((a, b) => b.completedToday - a.completedToday),
     };
 
+    
     onDayFinished(report);
   }
 

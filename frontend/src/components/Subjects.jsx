@@ -50,7 +50,7 @@ export default function Subjects({ subjects, setSubjects }) {
   }
 
   async function updateSubject(id, patch) {
-    // keep UI instant (optimistic) without changing style
+    
     const current = subjects.find((s) => s.id === id);
     if (!current) return;
 
@@ -60,13 +60,13 @@ export default function Subjects({ subjects, setSubjects }) {
     try {
       await plannerApi.updateSubject(id, updated);
     } catch {
-      // rollback by reloading
+      
       await refresh();
     }
   }
 
   async function removeSubject(id) {
-    // optimistic
+   
     setSubjects((prev) => prev.filter((s) => s.id !== id));
 
     try {
