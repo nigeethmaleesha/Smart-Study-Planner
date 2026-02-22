@@ -51,15 +51,7 @@ export default function PlannerSettings({ settings, setSettings }) {
         />
       </Card>
 
-      <div className="md:col-span-2">
-        <div className="rounded-3xl border bg-slate-50 p-5">
-          <div className="text-sm font-semibold text-slate-900">How this works</div>
-          <p className="mt-2 text-sm text-slate-600 leading-relaxed">
-            Backend generates schedule using <span className="font-semibold">Circular Linked List</span> +{" "}
-            <span className="font-semibold">Max Heap</span>. This page only collects inputs.
-          </p>
-        </div>
-      </div>
+      
     </div>
   );
 }

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import PlannerSettings from "./components/PlannerSettings";
 import Subjects from "./components/Subjects";
-import Schedule from "./components/Schedule";
+import Schedule, { usePlannerTimer } from "./components/Schedule"; 
 import Report from "./components/Report";
 import Dashboard from "./components/Dashboard";
+import MiniSessionPlayer from "./components/MiniSessionPlayer"; 
 import { loadState, saveState } from "./lib/storage";
 import { plannerApi } from "./api/plannerApi";
 
@@ -26,14 +27,24 @@ function normalizeSettings(s) {
   const safe = {
     startTime: s?.startTime || DEFAULT_SETTINGS.startTime,
     dailyMaxHours: Number(s?.dailyMaxHours ?? DEFAULT_SETTINGS.dailyMaxHours),
-    breakEveryMinutes: Number(s?.breakEveryMinutes ?? DEFAULT_SETTINGS.breakEveryMinutes),
-    breakDurationMinutes: Number(s?.breakDurationMinutes ?? DEFAULT_SETTINGS.breakDurationMinutes),
+    breakEveryMinutes: Number(
+      s?.breakEveryMinutes ?? DEFAULT_SETTINGS.breakEveryMinutes
+    ),
+    breakDurationMinutes: Number(
+      s?.breakDurationMinutes ?? DEFAULT_SETTINGS.breakDurationMinutes
+    ),
   };
 
   if (!safe.startTime) safe.startTime = "08:00";
-  if (!Number.isFinite(safe.dailyMaxHours) || safe.dailyMaxHours <= 0) safe.dailyMaxHours = 2;
-  if (!Number.isFinite(safe.breakEveryMinutes) || safe.breakEveryMinutes < 15) safe.breakEveryMinutes = 50;
-  if (!Number.isFinite(safe.breakDurationMinutes) || safe.breakDurationMinutes < 5) safe.breakDurationMinutes = 10;
+  if (!Number.isFinite(safe.dailyMaxHours) || safe.dailyMaxHours <= 0)
+    safe.dailyMaxHours = 2;
+  if (!Number.isFinite(safe.breakEveryMinutes) || safe.breakEveryMinutes < 15)
+    safe.breakEveryMinutes = 50;
+  if (
+    !Number.isFinite(safe.breakDurationMinutes) ||
+    safe.breakDurationMinutes < 5
+  )
+    safe.breakDurationMinutes = 10;
 
   return safe;
 }
@@ -48,17 +59,19 @@ export default function App() {
 
   const [dayStarted, setDayStarted] = useState(false);
 
-  
   const [missedLog, setMissedLog] = useState([]);
-
-  
   const [daySnapshot, setDaySnapshot] = useState({});
-
- 
   const [reports, setReports] = useState([]);
+
+
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const currentSession = schedule?.[currentIndex] || null;
 
   const [loading, setLoading] = useState(false);
   const [apiError, setApiError] = useState("");
+
+ 
+  const { running, secondsLeft } = usePlannerTimer();
 
   useEffect(() => {
     const saved = loadState();
@@ -70,24 +83,64 @@ export default function App() {
     if (saved?.daySnapshot) setDaySnapshot(saved.daySnapshot);
     if (saved?.reports) setReports(saved.reports);
     if (typeof saved?.dayStarted === "boolean") setDayStarted(saved.dayStarted);
+    if (typeof saved?.currentIndex === "number") setCurrentIndex(saved.currentIndex);
   }, []);
 
   useEffect(() => {
-    saveState({ settings, subjects, schedule, missed, missedLog, daySnapshot, reports, dayStarted });
-  }, [settings, subjects, schedule, missed, missedLog, daySnapshot, reports, dayStarted]);
+    saveState({
+      settings,
+      subjects,
+      schedule,
+      missed,
+      missedLog,
+      daySnapshot,
+      reports,
+      dayStarted,
+      currentIndex,
+    });
+  }, [
+    settings,
+    subjects,
+    schedule,
+    missed,
+    missedLog,
+    daySnapshot,
+    reports,
+    dayStarted,
+    currentIndex,
+  ]);
+
+  
+  useEffect(() => {
+    if (!schedule?.length) {
+      setCurrentIndex(0);
+      return;
+    }
+    if (currentIndex >= schedule.length) setCurrentIndex(0);
+    
+  }, [schedule.length]);
 
   const canStartDay = useMemo(() => {
     if (!subjects.length) return false;
-    return subjects.some((s) => Number(s.totalTopics || 0) - Number(s.completedTopics || 0) > 0);
+    return subjects.some(
+      (s) => Number(s.totalTopics || 0) - Number(s.completedTopics || 0) > 0
+    );
   }, [subjects]);
 
   const stats = useMemo(() => {
     const totalTopics = subjects.reduce((a, s) => a + Number(s.totalTopics || 0), 0);
-    const completedTopics = subjects.reduce((a, s) => a + Number(s.completedTopics || 0), 0);
+    const completedTopics = subjects.reduce(
+      (a, s) => a + Number(s.completedTopics || 0),
+      0
+    );
     const pct = totalTopics > 0 ? Math.round((completedTopics / totalTopics) * 100) : 0;
 
-    const studyMin = (schedule || []).filter((x) => x.type === "study").reduce((sum, x) => sum + Number(x.durationMinutes || 0), 0);
-    const breakMin = (schedule || []).filter((x) => x.type === "break").reduce((sum, x) => sum + Number(x.durationMinutes || 0), 0);
+    const studyMin = (schedule || [])
+      .filter((x) => x.type === "study")
+      .reduce((sum, x) => sum + Number(x.durationMinutes || 0), 0);
+    const breakMin = (schedule || [])
+      .filter((x) => x.type === "break")
+      .reduce((sum, x) => sum + Number(x.durationMinutes || 0), 0);
 
     return { pct, studyMin, breakMin };
   }, [subjects, schedule]);
@@ -102,7 +155,6 @@ export default function App() {
 
     setLoading(true);
     try {
-      
       try {
         const latest = await plannerApi.getSubjects();
         if (Array.isArray(latest)) setSubjects(latest);
@@ -117,6 +169,7 @@ export default function App() {
       }
 
       setSchedule(data);
+      setCurrentIndex(0);
       setTab("Schedule");
     } catch (e) {
       setApiError(e.message || "Failed to generate schedule.");
@@ -125,7 +178,6 @@ export default function App() {
     }
   }
 
-  // Start Day: snapshot + clear logs + generate schedule
   async function startDay() {
     setApiError("");
     setDayStarted(true);
@@ -136,6 +188,7 @@ export default function App() {
     for (const s of subjects) snap[String(s.id)] = Number(s.completedTopics || 0);
     setDaySnapshot(snap);
 
+    setCurrentIndex(0);
     setTab("Schedule");
     await generateSchedule();
   }
@@ -147,31 +200,37 @@ export default function App() {
     setMissed([]);
     setMissedLog([]);
     setDaySnapshot({});
+    setCurrentIndex(0);
     setTab("Planner");
   }
 
-  // Called by Schedule when end-of-day
   function onDayFinished(report) {
-    
     setReports((prev) => [report, ...(prev || [])]);
 
-    // clear day schedule & logs and show dashboard
     setSchedule([]);
     setMissed([]);
     setMissedLog([]);
     setDaySnapshot({});
     setDayStarted(false);
+    setCurrentIndex(0);
 
     setTab("Dashboard");
   }
+
+  // MINI PLAYER VISIBILITY
+  const miniVisible = !!currentSession && dayStarted && secondsLeft > 0;
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
       <div className="mx-auto max-w-6xl px-4 py-6 md:px-6">
         <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div>
-            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight text-slate-900">Smart Study Planner</h1>
-            <p className="mt-1 text-sm text-slate-500">Start Day → plan → sessions → auto report.</p>
+            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight text-slate-900">
+              Smart Study Planner
+            </h1>
+            <p className="mt-1 text-sm text-slate-500">
+              Start Day → plan → sessions → auto report.
+            </p>
           </div>
 
           <div className="flex items-center gap-3">
@@ -223,7 +282,9 @@ export default function App() {
                   }}
                   className={[
                     "w-full rounded-2xl px-4 py-3 text-left text-sm font-semibold transition",
-                    tab === t.key ? "bg-slate-900 text-white shadow-sm" : "text-slate-700 hover:bg-slate-50",
+                    tab === t.key
+                      ? "bg-slate-900 text-white shadow-sm"
+                      : "text-slate-700 hover:bg-slate-50",
                   ].join(" ")}
                 >
                   {t.label}
@@ -250,7 +311,10 @@ export default function App() {
             )}
 
             {tab === "Subjects" && (
-              <Panel title="Subjects" subtitle="Add and manage subjects, topics, and durations.">
+              <Panel
+                title="Subjects"
+                subtitle="Add and manage subjects, topics, and durations."
+              >
                 <Subjects subjects={subjects} setSubjects={setSubjects} />
               </Panel>
             )}
@@ -262,7 +326,10 @@ export default function App() {
             )}
 
             {tab === "Schedule" && dayStarted && (
-              <Panel title="Daily Planner" subtitle="Current session + skip/complete + break auto-timer + end report.">
+              <Panel
+                title="Daily Planner"
+                subtitle="Current session + skip/complete + break auto-timer + end report."
+              >
                 <Schedule
                   settings={settings}
                   schedule={schedule}
@@ -277,6 +344,8 @@ export default function App() {
                   daySnapshot={daySnapshot}
                   setDaySnapshot={setDaySnapshot}
                   onDayFinished={onDayFinished}
+                  currentIndex={currentIndex}
+                  setCurrentIndex={setCurrentIndex}
                 />
               </Panel>
             )}
@@ -289,6 +358,15 @@ export default function App() {
           </section>
         </div>
       </div>
+
+      {/* MINI SESSION PLAYER*/}
+      <MiniSessionPlayer
+        visible={miniVisible}
+        session={currentSession}
+        running={running}
+        secondsLeft={secondsLeft}
+        onOpenSchedule={() => setTab("Schedule")}
+      />
     </div>
   );
 }
