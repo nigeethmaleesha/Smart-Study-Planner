@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { plannerApi } from "../api/plannerApi";
 
-
 const PlannerTimer = (() => {
   let running = false;
   let secondsLeft = 0;
@@ -112,8 +111,6 @@ export function usePlannerTimer() {
   return state;
 }
 
-
-
 function normalizeSettings(s) {
   return {
     startTime: s?.startTime || "08:00",
@@ -138,11 +135,13 @@ export default function Schedule({
   daySnapshot,
   onDayFinished,
 
-  
   currentIndex,
   setCurrentIndex,
 }) {
   const [busy, setBusy] = useState(false);
+
+  // ✅ message when expired target dates are skipped
+  const [dateNotice, setDateNotice] = useState("");
 
   // from global timer store
   const [running, setRunning] = useState(false);
@@ -153,6 +152,93 @@ export default function Schedule({
 
   const current = schedule?.[currentIndex] || null;
   const next = schedule?.[currentIndex + 1] || null;
+
+  // ----------------------------
+  // Target date / deadline helpers
+  // ----------------------------
+  function getStartOfToday() {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  function parseAnyDate(dateLike) {
+    if (!dateLike) return null;
+
+    // If already Date
+    if (dateLike instanceof Date && !isNaN(dateLike.getTime())) return dateLike;
+
+    // Numeric timestamp
+    if (typeof dateLike === "number" && Number.isFinite(dateLike)) {
+      const d = new Date(dateLike);
+      return isNaN(d.getTime()) ? null : d;
+    }
+
+    // String date (supports YYYY-MM-DD / ISO / others)
+    if (typeof dateLike === "string") {
+      const trimmed = dateLike.trim();
+      if (!trimmed) return null;
+
+      // Common "YYYY-MM-DD" fix: treat as local date start
+      const ymd = /^\d{4}-\d{2}-\d{2}$/;
+      if (ymd.test(trimmed)) {
+        const [y, m, day] = trimmed.split("-").map((x) => Number(x));
+        const d = new Date(y, m - 1, day);
+        return isNaN(d.getTime()) ? null : d;
+      }
+
+      const d = new Date(trimmed);
+      return isNaN(d.getTime()) ? null : d;
+    }
+
+    return null;
+  }
+
+  // Tries multiple field names so it works even if your DB uses different column name
+  function getSubjectTargetDate(subject) {
+    if (!subject) return null;
+    return (
+      subject.targetDate ??
+      subject.deadline ??
+      subject.dueDate ??
+      subject.endDate ??
+      subject.target_date ??
+      subject.deadline_date ??
+      subject.due_date ??
+      null
+    );
+  }
+
+  function isTargetDatePassed(subject) {
+    const raw = getSubjectTargetDate(subject);
+    const d = parseAnyDate(raw);
+    if (!d) return false; // if no date, don't block scheduling
+    const today0 = getStartOfToday();
+    const cmp = new Date(d);
+    cmp.setHours(0, 0, 0, 0);
+    return cmp.getTime() < today0.getTime(); // strictly before today
+  }
+
+  function filterOutExpiredSessions(list, subjectList) {
+    const subs = Array.isArray(subjectList) ? subjectList : [];
+    const data = Array.isArray(list) ? list : [];
+
+    const skippedNames = [];
+    const filtered = data.filter((item) => {
+      if (!item || item.type !== "study") return true;
+
+      const subj = subs.find((s) => String(s.id) === String(item.subjectId));
+      if (!subj) return true;
+
+      if (isTargetDatePassed(subj)) {
+        skippedNames.push(subj.name || item.subjectName || `Subject ${subj.id}`);
+        return false;
+      }
+      return true;
+    });
+
+    return { filtered, skippedNames };
+  }
 
   // Subscribe to timer updates
   useEffect(() => {
@@ -178,8 +264,38 @@ export default function Schedule({
       setCurrentIndex(0);
       PlannerTimer.stop(true);
     }
-    
   }, [schedule.length]);
+
+  // ✅ If schedule already contains expired target-date sessions (from backend or old state), remove them
+  useEffect(() => {
+    if (!Array.isArray(schedule) || schedule.length === 0) return;
+    if (!Array.isArray(subjects) || subjects.length === 0) return;
+
+    const { filtered, skippedNames } = filterOutExpiredSessions(schedule, subjects);
+
+    if (filtered.length !== schedule.length) {
+      stopTimer(true);
+
+      // adjust index safely
+      let newIdx = currentIndex;
+      if (newIdx >= filtered.length) newIdx = Math.max(0, filtered.length - 1);
+
+      setSchedule(filtered);
+      setCurrentIndex(newIdx);
+
+      if (skippedNames.length > 0) {
+        const unique = Array.from(new Set(skippedNames));
+        setDateNotice(
+          `⛔ Not scheduled (target date passed): ${unique.join(
+            ", "
+          )}. Please update the target date to plan them again.`
+        );
+      }
+    } else {
+      // keep existing notice (don’t wipe while user reads)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subjects, schedule]);
 
   // Auto start BREAK only
   useEffect(() => {
@@ -188,7 +304,6 @@ export default function Schedule({
     if (running) return;
 
     startTimerForCurrent();
-    
   }, [currentIndex, current?.type]);
 
   async function refreshSubjects() {
@@ -286,9 +401,29 @@ export default function Schedule({
       const data = await plannerApi.generateSchedule(normalizeSettings(settings));
 
       if (Array.isArray(data) && data.length > 0) {
-        const safeIdx = Math.min(keepIdx, data.length - 1);
-        setSchedule(data);
-        setCurrentIndex(safeIdx);
+        // ✅ filter out sessions whose subject target date has passed
+        const { filtered, skippedNames } = filterOutExpiredSessions(data, subjects);
+
+        if (skippedNames.length > 0) {
+          const unique = Array.from(new Set(skippedNames));
+          const msg = `⛔ Not scheduled (target date passed): ${unique.join(
+            ", "
+          )}. Please update the target date to plan them again.`;
+          setDateNotice(msg);
+
+          // also show a popup message (so user can't miss it)
+          window.alert(msg);
+        }
+
+        const safeData = filtered;
+        if (safeData.length === 0) {
+          setSchedule([]);
+          setCurrentIndex(0);
+        } else {
+          const safeIdx = Math.min(keepIdx, safeData.length - 1);
+          setSchedule(safeData);
+          setCurrentIndex(safeIdx);
+        }
       } else {
         setSchedule([]);
         setCurrentIndex(0);
@@ -508,12 +643,20 @@ export default function Schedule({
                 </div>
 
                 <div className="mt-1 text-sm text-slate-600">
-                  Start: {current.startTime} • Duration: {current.durationMinutes} min
+                  Start: {current.startTime} • Duration: {current.durationMinutes}{" "}
+                  min
                 </div>
 
                 <div className="mt-3 text-sm font-semibold text-slate-900">
                   {statusText}
                 </div>
+
+                {/* ✅ message (only when needed) */}
+                {dateNotice ? (
+                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    {dateNotice}
+                  </div>
+                ) : null}
 
                 <div className="mt-4 rounded-2xl bg-slate-50 p-4">
                   <div className="text-xs font-semibold text-slate-500">NEXT</div>
@@ -587,7 +730,9 @@ export default function Schedule({
       <div className="rounded-3xl border bg-white p-6 shadow-sm">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-base font-semibold text-slate-900">Today Plan</div>
+            <div className="text-base font-semibold text-slate-900">
+              Today Plan
+            </div>
             <div className="mt-1 text-sm text-slate-500">
               Click a row to jump to that session.
             </div>
@@ -625,7 +770,9 @@ export default function Schedule({
                   <td className="py-3 text-slate-700">{idx + 1}</td>
                   <td className="py-3 font-semibold text-slate-900">{s.type}</td>
                   <td className="py-3 text-slate-700">{s.startTime}</td>
-                  <td className="py-3 text-slate-700">{s.durationMinutes} min</td>
+                  <td className="py-3 text-slate-700">
+                    {s.durationMinutes} min
+                  </td>
                   <td className="py-3 text-slate-700">
                     {s.type === "study" ? s.subjectName : "-"}
                   </td>
