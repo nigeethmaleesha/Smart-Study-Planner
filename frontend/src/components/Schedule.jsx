@@ -1,6 +1,119 @@
 import { useEffect, useRef, useState } from "react";
 import { plannerApi } from "../api/plannerApi";
 
+
+const PlannerTimer = (() => {
+  let running = false;
+  let secondsLeft = 0;
+  let intervalId = null;
+
+  let onFinish = null;
+  const listeners = new Set();
+
+  function notify() {
+    const snap = { running, secondsLeft };
+    listeners.forEach((fn) => fn(snap));
+  }
+
+  function subscribe(fn) {
+    listeners.add(fn);
+    fn({ running, secondsLeft });
+    return () => listeners.delete(fn);
+  }
+
+  function start(durationSeconds, finishCallback) {
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return;
+    stop(false);
+
+    secondsLeft = durationSeconds;
+    onFinish = finishCallback;
+    running = true;
+    notify();
+
+    intervalId = setInterval(() => {
+      secondsLeft -= 1;
+
+      if (secondsLeft <= 0) {
+        secondsLeft = 0;
+        running = false;
+        notify();
+
+        const cb = onFinish;
+        onFinish = null;
+
+        if (intervalId) clearInterval(intervalId);
+        intervalId = null;
+
+        if (typeof cb === "function") cb();
+        return;
+      }
+
+      notify();
+    }, 1000);
+  }
+
+  function pause() {
+    if (!running) return;
+    running = false;
+    if (intervalId) clearInterval(intervalId);
+    intervalId = null;
+    notify();
+  }
+
+  function resume(finishCallback) {
+    if (running) return;
+    if (secondsLeft <= 0) return;
+
+    onFinish = finishCallback || onFinish;
+    running = true;
+    notify();
+
+    intervalId = setInterval(() => {
+      secondsLeft -= 1;
+
+      if (secondsLeft <= 0) {
+        secondsLeft = 0;
+        running = false;
+        notify();
+
+        const cb = onFinish;
+        onFinish = null;
+
+        if (intervalId) clearInterval(intervalId);
+        intervalId = null;
+
+        if (typeof cb === "function") cb();
+        return;
+      }
+
+      notify();
+    }, 1000);
+  }
+
+  function stop(reset = true) {
+    if (intervalId) clearInterval(intervalId);
+    intervalId = null;
+    running = false;
+    onFinish = null;
+    if (reset) secondsLeft = 0;
+    notify();
+  }
+
+  function getState() {
+    return { running, secondsLeft };
+  }
+
+  return { subscribe, start, pause, resume, stop, getState };
+})();
+
+export function usePlannerTimer() {
+  const [state, setState] = useState(PlannerTimer.getState());
+  useEffect(() => PlannerTimer.subscribe(setState), []);
+  return state;
+}
+
+
+
 function normalizeSettings(s) {
   return {
     startTime: s?.startTime || "08:00",
@@ -24,55 +137,58 @@ export default function Schedule({
   setMissedLog,
   daySnapshot,
   onDayFinished,
+
+  
+  currentIndex,
+  setCurrentIndex,
 }) {
   const [busy, setBusy] = useState(false);
 
-  const [currentIndex, setCurrentIndex] = useState(0);
-
+  // from global timer store
   const [running, setRunning] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(0);
-  const intervalRef = useRef(null);
-  const timeUpHandledRef = useRef(false);
 
-  //  anti double click guard for Skip/Complete
+  const timeUpHandledRef = useRef(false);
   const actionLockRef = useRef(false);
 
   const current = schedule?.[currentIndex] || null;
   const next = schedule?.[currentIndex + 1] || null;
 
+  // Subscribe to timer updates
   useEffect(() => {
-    return () => intervalRef.current && clearInterval(intervalRef.current);
+    return PlannerTimer.subscribe(({ running, secondsLeft }) => {
+      setRunning(running);
+      setSecondsLeft(secondsLeft);
+    });
   }, []);
 
-  // reset time up guard & lock when session changes
   useEffect(() => {
     timeUpHandledRef.current = false;
     actionLockRef.current = false;
-    stopTimer(true);
-    // eslint disable next line react hooks/exhaustive-deps
   }, [currentIndex]);
 
   // keep index valid
   useEffect(() => {
     if ((schedule || []).length === 0) {
       setCurrentIndex(0);
-      stopTimer(true);
+      PlannerTimer.stop(true);
       return;
     }
     if (currentIndex >= schedule.length) {
       setCurrentIndex(0);
-      stopTimer(true);
+      PlannerTimer.stop(true);
     }
-    // eslint disable next line react hooks/exhaustive-deps
+    
   }, [schedule.length]);
 
-  //  Auto start BREAK only
+  // Auto start BREAK only
   useEffect(() => {
     if (!current) return;
     if (current.type !== "break") return;
     if (running) return;
-    startTimerForCurrent(); // break auto
-    // eslint disable next line react hooks/exhaustive-deps
+
+    startTimerForCurrent();
+    
   }, [currentIndex, current?.type]);
 
   async function refreshSubjects() {
@@ -102,10 +218,7 @@ export default function Schedule({
   }
 
   function stopTimer(reset = false) {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    intervalRef.current = null;
-    setRunning(false);
-    if (reset) setSecondsLeft(0);
+    PlannerTimer.stop(reset);
   }
 
   function startTimerForCurrent() {
@@ -113,41 +226,39 @@ export default function Schedule({
 
     timeUpHandledRef.current = false;
 
-    const startSeconds =
-      secondsLeft > 0 ? secondsLeft : Number(current.durationMinutes || 0) * 60;
+    const durationSeconds = Number(current.durationMinutes || 0) * 60;
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return;
 
-    setSecondsLeft(startSeconds);
-    setRunning(true);
+    PlannerTimer.start(durationSeconds, () => {
+      if (timeUpHandledRef.current) return;
+      timeUpHandledRef.current = true;
 
-    intervalRef.current = setInterval(() => {
-      setSecondsLeft((prev) => {
-        if (prev <= 1) {
-          if (timeUpHandledRef.current) return 0;
-          timeUpHandledRef.current = true;
-
-          stopTimer(true);
-
-          if (current?.type === "study") {
-            setTimeout(() => completeCurrentStudy(true), 0);
-          } else {
-            setTimeout(() => moveToNextOrEnd(), 0);
-          }
-
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+      if (current?.type === "study") {
+        completeCurrentStudy(true);
+      } else {
+        moveToNextOrEnd();
+      }
+    });
   }
 
   function toggleTimer() {
     if (!current) return;
-    if (current.type === "break") return; // break auto only
+    if (current.type === "break") return;
 
     if (running) {
-      stopTimer(false);
+      PlannerTimer.pause();
       return;
     }
+
+    if (secondsLeft > 0) {
+      PlannerTimer.resume(() => {
+        if (timeUpHandledRef.current) return;
+        timeUpHandledRef.current = true;
+        completeCurrentStudy(true);
+      });
+      return;
+    }
+
     startTimerForCurrent();
   }
 
@@ -172,9 +283,7 @@ export default function Schedule({
 
     setBusy(true);
     try {
-      const data = await plannerApi.generateSchedule(
-        normalizeSettings(settings)
-      );
+      const data = await plannerApi.generateSchedule(normalizeSettings(settings));
 
       if (Array.isArray(data) && data.length > 0) {
         const safeIdx = Math.min(keepIdx, data.length - 1);
@@ -191,13 +300,9 @@ export default function Schedule({
     }
   }
 
-  //  MUST show confirm when 100% complete
   async function confirmDeleteIfComplete(subjectId) {
-    // refresh latest subjects to avoid stale object
     const latestSubjects = await refreshSubjects();
-    const subj = latestSubjects.find(
-      (s) => String(s.id) === String(subjectId)
-    );
+    const subj = latestSubjects.find((s) => String(s.id) === String(subjectId));
     if (!subj) return;
 
     const remaining = Math.max(
@@ -220,8 +325,6 @@ export default function Schedule({
     await refreshSubjects();
   }
 
-  //  Complete study session
-  // moveNextAfter = true => go to next slot immediately
   async function completeCurrentStudy(moveNextAfter = true) {
     if (!current || current.type !== "study") return;
     if (actionLockRef.current) return;
@@ -236,10 +339,7 @@ export default function Schedule({
 
     const done = Math.max(0, Number(input || 0));
 
-    // find subject
-    const subj = subjects.find(
-      (s) => String(s.id) === String(current.subjectId)
-    );
+    const subj = subjects.find((s) => String(s.id) === String(current.subjectId));
 
     if (subj) {
       const updated = {
@@ -254,29 +354,32 @@ export default function Schedule({
         await plannerApi.updateSubject(subj.id, updated);
       } catch {}
 
-      //  show confirm if completed
       await confirmDeleteIfComplete(subj.id);
     }
 
-    // move next first (as you requested)
     if (moveNextAfter) {
       const nextIdx = Math.min(
         currentIndex + 1,
         Math.max(0, (schedule?.length || 1) - 1)
       );
-      setCurrentIndex(nextIdx);
+      const isLast = currentIndex >= (schedule?.length || 1) - 1;
 
+      if (isLast) {
+        await finishDayNow();
+        actionLockRef.current = false;
+        return;
+      }
+
+      setCurrentIndex(nextIdx);
       await regenerateScheduleKeepIndex(nextIdx);
       actionLockRef.current = false;
       return;
     }
 
-    // else rebuild in same index
     await regenerateScheduleKeepIndex(currentIndex);
     actionLockRef.current = false;
   }
 
-  //  Skip current study session
   async function skipSession() {
     if (!current || current.type !== "study") return;
     if (actionLockRef.current) return;
@@ -284,7 +387,6 @@ export default function Schedule({
 
     stopTimer(true);
 
-    //  Add to missedLog ONLY ONCE (no duplicates for same index & startTime)
     setMissedLog((prev) => {
       const key = `${current.subjectId}__${current.startTime}__${currentIndex}`;
       const already = prev.some(
@@ -304,14 +406,12 @@ export default function Schedule({
       ];
     });
 
-    // backend unique set (ok)
     try {
       await plannerApi.markMissed(current.subjectId);
     } catch {}
 
     await refreshMissed();
 
-    // go next slot immediately
     const nextIdx = Math.min(
       currentIndex + 1,
       Math.max(0, (schedule?.length || 1) - 1)
@@ -334,7 +434,6 @@ export default function Schedule({
 
     const snap = daySnapshot || {};
 
-    // completed today
     const subjectRowsBase = subjects.map((s) => {
       const before = Number(snap[String(s.id)] || 0);
       const after = Number(s.completedTopics || 0);
@@ -346,7 +445,6 @@ export default function Schedule({
       };
     });
 
-    // missed per subject
     const missCountMap = new Map();
     for (const m of missedLog || []) {
       const key = String(m.subjectId);
@@ -364,7 +462,6 @@ export default function Schedule({
       (a, r) => a + r.completedToday,
       0
     );
-
     const missedCount = (missedLog || []).length;
 
     const now = new Date();
@@ -411,8 +508,7 @@ export default function Schedule({
                 </div>
 
                 <div className="mt-1 text-sm text-slate-600">
-                  Start: {current.startTime} • Duration:{" "}
-                  {current.durationMinutes} min
+                  Start: {current.startTime} • Duration: {current.durationMinutes} min
                 </div>
 
                 <div className="mt-3 text-sm font-semibold text-slate-900">
@@ -420,9 +516,7 @@ export default function Schedule({
                 </div>
 
                 <div className="mt-4 rounded-2xl bg-slate-50 p-4">
-                  <div className="text-xs font-semibold text-slate-500">
-                    NEXT
-                  </div>
+                  <div className="text-xs font-semibold text-slate-500">NEXT</div>
                   {next ? (
                     <div className="mt-1 text-sm text-slate-700">
                       {next.type === "study"
@@ -446,7 +540,7 @@ export default function Schedule({
               className="rounded-2xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-50"
               title={current?.type === "break" ? "Break auto starts" : ""}
             >
-              {running ? "Pause" : "Start"}
+              {running ? "Pause" : secondsLeft > 0 ? "Resume" : "Start"}
             </button>
 
             <button
@@ -469,12 +563,12 @@ export default function Schedule({
 
         <div className="mt-4 flex items-center justify-between text-sm">
           <div className="text-slate-600">
-            Missed (backend unique):{" "}
+            Missed :{" "}
             <span className="font-semibold text-slate-900">
               {missed?.length || 0}
             </span>
             <span className="mx-2">•</span>
-            Skips today (every click):{" "}
+            Skips today :{" "}
             <span className="font-semibold text-slate-900">
               {missedLog?.length || 0}
             </span>
@@ -493,9 +587,7 @@ export default function Schedule({
       <div className="rounded-3xl border bg-white p-6 shadow-sm">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-base font-semibold text-slate-900">
-              Today Plan
-            </div>
+            <div className="text-base font-semibold text-slate-900">Today Plan</div>
             <div className="mt-1 text-sm text-slate-500">
               Click a row to jump to that session.
             </div>
@@ -533,9 +625,7 @@ export default function Schedule({
                   <td className="py-3 text-slate-700">{idx + 1}</td>
                   <td className="py-3 font-semibold text-slate-900">{s.type}</td>
                   <td className="py-3 text-slate-700">{s.startTime}</td>
-                  <td className="py-3 text-slate-700">
-                    {s.durationMinutes} min
-                  </td>
+                  <td className="py-3 text-slate-700">{s.durationMinutes} min</td>
                   <td className="py-3 text-slate-700">
                     {s.type === "study" ? s.subjectName : "-"}
                   </td>
