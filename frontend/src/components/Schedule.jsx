@@ -20,12 +20,10 @@ export default function Schedule({
   setSubjects,
   dayStarted,
 
-  
   missedLog,
   setMissedLog,
   daySnapshot,
-  setDaySnapshot,
-  onDayFinished, 
+  onDayFinished,
 }) {
   const [busy, setBusy] = useState(false);
 
@@ -36,7 +34,7 @@ export default function Schedule({
   const intervalRef = useRef(null);
   const timeUpHandledRef = useRef(false);
 
-  // ✅ anti-double-click guard for Skip/Complete
+  //  anti double click guard for Skip/Complete
   const actionLockRef = useRef(false);
 
   const current = schedule?.[currentIndex] || null;
@@ -51,20 +49,10 @@ export default function Schedule({
     timeUpHandledRef.current = false;
     actionLockRef.current = false;
     stopTimer(true);
-    
+    // eslint disable next line react hooks/exhaustive-deps
   }, [currentIndex]);
 
-  // Auto-start BREAK only 
-  useEffect(() => {
-    if (!current) return;
-    if (current.type !== "break") return;
-    if (running) return;
-
-    
-    startTimerForCurrent();
-    
-  }, [currentIndex, current?.type]);
-
+  // keep index valid
   useEffect(() => {
     if ((schedule || []).length === 0) {
       setCurrentIndex(0);
@@ -75,16 +63,16 @@ export default function Schedule({
       setCurrentIndex(0);
       stopTimer(true);
     }
-    
+    // eslint disable next line react hooks/exhaustive-deps
   }, [schedule.length]);
 
-  // ✅ Auto start BREAK only
+  //  Auto start BREAK only
   useEffect(() => {
     if (!current) return;
     if (current.type !== "break") return;
     if (running) return;
     startTimerForCurrent(); // break auto
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint disable next line react hooks/exhaustive-deps
   }, [currentIndex, current?.type]);
 
   async function refreshSubjects() {
@@ -170,7 +158,6 @@ export default function Schedule({
 
     const isLast = currentIndex >= schedule.length - 1;
     if (isLast) {
-      
       finishDayNow();
       return;
     }
@@ -204,8 +191,7 @@ export default function Schedule({
     }
   }
 
-  
-  // ✅ MUST show confirm when 100% complete
+  //  MUST show confirm when 100% complete
   async function confirmDeleteIfComplete(subjectId) {
     // refresh latest subjects to avoid stale object
     const latestSubjects = await refreshSubjects();
@@ -234,7 +220,7 @@ export default function Schedule({
     await refreshSubjects();
   }
 
-  // ✅ Complete study session
+  //  Complete study session
   // moveNextAfter = true => go to next slot immediately
   async function completeCurrentStudy(moveNextAfter = true) {
     if (!current || current.type !== "study") return;
@@ -268,7 +254,7 @@ export default function Schedule({
         await plannerApi.updateSubject(subj.id, updated);
       } catch {}
 
-      // ✅ show confirm if completed
+      //  show confirm if completed
       await confirmDeleteIfComplete(subj.id);
     }
 
@@ -285,38 +271,20 @@ export default function Schedule({
       return;
     }
 
-    await regenerateScheduleKeepIndex(keepIdx);
-
-    
-    if (keepIdx >= (schedule?.length || 1) - 1) {
-      
-    }
     // else rebuild in same index
     await regenerateScheduleKeepIndex(currentIndex);
     actionLockRef.current = false;
   }
 
-  // ✅ Skip current study session
+  //  Skip current study session
   async function skipSession() {
     if (!current || current.type !== "study") return;
-
-    // add to local missedLog (counts every skip)
-    setMissedLog((prev) => [
-      ...prev,
-      {
-        at: new Date().toISOString(),
-        subjectId: current.subjectId,
-        subjectName: current.subjectName,
-        startTime: current.startTime,
-        index: currentIndex,
-      },
-    ]);
     if (actionLockRef.current) return;
     actionLockRef.current = true;
 
     stopTimer(true);
 
-    // ✅ Add to missedLog ONLY ONCE (no duplicates for same index & startTime)
+    //  Add to missedLog ONLY ONCE (no duplicates for same index & startTime)
     setMissedLog((prev) => {
       const key = `${current.subjectId}__${current.startTime}__${currentIndex}`;
       const already = prev.some(
@@ -338,14 +306,11 @@ export default function Schedule({
 
     // backend unique set (ok)
     try {
-      await plannerApi.markMissed(current.subjectId); 
       await plannerApi.markMissed(current.subjectId);
     } catch {}
 
     await refreshMissed();
 
-    
-    moveToNextOrEnd();
     // go next slot immediately
     const nextIdx = Math.min(
       currentIndex + 1,
@@ -367,7 +332,6 @@ export default function Schedule({
   async function finishDayNow() {
     stopTimer(true);
 
-    // compute completed topics TODAY using snapshot
     const snap = daySnapshot || {};
 
     // completed today
@@ -418,7 +382,6 @@ export default function Schedule({
       subjectRows: mergedRows.sort((a, b) => b.completedToday - a.completedToday),
     };
 
-    
     onDayFinished(report);
   }
 
