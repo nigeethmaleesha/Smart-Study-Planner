@@ -48,13 +48,13 @@ export default function App() {
 
   const [dayStarted, setDayStarted] = useState(false);
 
-  // NEW: missedLog counts every skip click
+  
   const [missedLog, setMissedLog] = useState([]);
 
-  // NEW: snapshot of completedTopics at start of day
+  
   const [daySnapshot, setDaySnapshot] = useState({});
 
-  // NEW: daily report history (latest first)
+ 
   const [reports, setReports] = useState([]);
 
   const [loading, setLoading] = useState(false);
@@ -102,7 +102,7 @@ export default function App() {
 
     setLoading(true);
     try {
-      // refresh subjects from backend (helps with ids)
+      
       try {
         const latest = await plannerApi.getSubjects();
         if (Array.isArray(latest)) setSubjects(latest);
@@ -125,7 +125,7 @@ export default function App() {
     }
   }
 
-  // ✅ Start Day: snapshot + clear logs + generate schedule
+  // Start Day: snapshot + clear logs + generate schedule
   async function startDay() {
     setApiError("");
     setDayStarted(true);
@@ -150,9 +150,9 @@ export default function App() {
     setTab("Planner");
   }
 
-  // ✅ Called by Schedule when end-of-day
+  // Called by Schedule when end-of-day
   function onDayFinished(report) {
-    // save report (latest first)
+    
     setReports((prev) => [report, ...(prev || [])]);
 
     // clear day schedule & logs and show dashboard

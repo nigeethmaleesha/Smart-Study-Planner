@@ -20,12 +20,12 @@ export default function Schedule({
   setSubjects,
   dayStarted,
 
-  // NEW
+  
   missedLog,
   setMissedLog,
   daySnapshot,
   setDaySnapshot,
-  onDayFinished, // callback from App to save report + reset day
+  onDayFinished, 
 }) {
   const [busy, setBusy] = useState(false);
 
@@ -46,18 +46,18 @@ export default function Schedule({
   useEffect(() => {
     timeUpHandledRef.current = false;
     stopTimer(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    
   }, [currentIndex]);
 
-  // ✅ Auto-start BREAK only (not study)
+  // Auto-start BREAK only 
   useEffect(() => {
     if (!current) return;
     if (current.type !== "break") return;
     if (running) return;
 
-    // auto start break countdown
+    
     startTimerForCurrent();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    
   }, [currentIndex, current?.type]);
 
   useEffect(() => {
@@ -70,7 +70,7 @@ export default function Schedule({
       setCurrentIndex(0);
       stopTimer(true);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    
   }, [schedule.length]);
 
   async function refreshSubjects() {
@@ -152,7 +152,7 @@ export default function Schedule({
     const isLast = currentIndex >= schedule.length - 1;
 
     if (isLast) {
-      // ✅ End of day
+      
       finishDayNow();
       return;
     }
@@ -183,7 +183,7 @@ export default function Schedule({
     }
   }
 
-  // ✅ 100% complete confirm + optionally delete permanently
+  
   async function confirmDeleteIfComplete(subjectId) {
     const subj = subjects.find((s) => String(s.id) === String(subjectId));
     if (!subj) return;
@@ -243,16 +243,16 @@ export default function Schedule({
 
     await regenerateScheduleKeepIndex(keepIdx);
 
-    // if after rebuild we are at end, finish day
+    
     if (keepIdx >= (schedule?.length || 1) - 1) {
-      // safe check later by UI
+      
     }
   }
 
   async function skipSession() {
     if (!current || current.type !== "study") return;
 
-    // ✅ add to local missedLog (counts every skip)
+    // add to local missedLog (counts every skip)
     setMissedLog((prev) => [
       ...prev,
       {
@@ -267,11 +267,11 @@ export default function Schedule({
     stopTimer(true);
 
     try {
-      await plannerApi.markMissed(current.subjectId); // backend unique set ok
+      await plannerApi.markMissed(current.subjectId); 
     } catch {}
     await refreshMissed();
 
-    // move next or finish day
+    
     moveToNextOrEnd();
 
     // rebuild but keep currentIndex (after move)
@@ -282,7 +282,7 @@ export default function Schedule({
   async function finishDayNow() {
     stopTimer(true);
 
-    // ✅ compute completed topics TODAY using snapshot
+    // compute completed topics TODAY using snapshot
     const snap = daySnapshot || {};
     const subjectRows = subjects.map((s) => {
       const before = Number(snap[String(s.id)] || 0);
@@ -323,7 +323,7 @@ export default function Schedule({
       subjectRows: mergedRows.sort((a, b) => b.completedToday - a.completedToday),
     };
 
-    // callback to App: save report + clear day
+    
     onDayFinished(report);
   }
 
